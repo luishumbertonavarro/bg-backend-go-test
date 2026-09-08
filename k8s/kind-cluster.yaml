@@ -1,0 +1,18 @@
+# Cluster local de un solo nodo para el POC.
+#
+# El extraPortMapping es imprescindible: expone el NodePort del cluster en el
+# host para que el Angular de localhost:4200 y las tools de tools/ puedan llegar
+# al Service.
+#
+# No se usa `kubectl port-forward` a proposito: fija UN pod concreto y anularia
+# justo el reparto entre replicas que este POC quiere observar.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: wspoc
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # Go
+      - containerPort: 30084
+        hostPort: 30084
+        protocol: TCP

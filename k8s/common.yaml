@@ -1,0 +1,47 @@
+# Configuracion compartida por los dos backends desplegados.
+#
+# Dentro de la imagen no hay .env: los backends leen variables de entorno, que
+# en este POC tienen prioridad sobre el fichero (PocConfig.cs, config.go).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wspoc
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wspoc-config
+  namespace: wspoc
+data:
+  WS_PORT: "8080"
+  # Sin esto el proceso escucharia solo en loopback y el pod seria inalcanzable
+  # desde el Service. El default del codigo sigue siendo 127.0.0.1 a proposito.
+  WS_BIND_ADDRESS: "0.0.0.0"
+
+  WS_JWT_ISSUER: "ws-poc-issuer"
+  WS_JWT_AUDIENCE: "ws-poc-clients"
+
+  # El navegador sigue sirviendo la UI desde localhost:4200, asi que el Origin
+  # que llega no cambia por estar detras del Service.
+  WS_ALLOWED_ORIGINS: "http://localhost:4200,http://127.0.0.1:4200"
+
+  WS_MAX_MESSAGE_BYTES: "65536"
+  WS_RATE_LIMIT_PER_SEC: "20"
+
+  # OJO: este tope es POR PROCESO. Con 2 replicas el techo real del servicio es
+  # el doble. Es justamente lo que el experimento 2 pretende demostrar.
+  WS_MAX_CONNECTIONS: "200"
+
+  WS_IDLE_TIMEOUT_SECONDS: "60"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: wspoc-secret
+  namespace: wspoc
+type: Opaque
+stringData:
+  # Mismo valor que el .env de la raiz: los cuatro backends validan HS256 con
+  # secreto compartido y sin estado, asi que N replicas aceptan el mismo token.
+  # Es un secreto de POC; en un despliegue real no iria en el repositorio.
+  WS_JWT_SECRET: "poc-websocket-shared-secret-change-me-min-32-bytes"

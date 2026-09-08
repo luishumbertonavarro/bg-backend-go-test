@@ -1,0 +1,13 @@
+{
+  "name": "ws-poc-go-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Utilidades del POC: generador de JWT, sondas de seguridad y prueba de carga contra el backend Go.",
+  "scripts": {
+    "token": "node gen-token.js",
+    "tokens": "node gen-token.js --all",
+    "probe": "node probe.js",
+    "load": "node loadtest.js"
+  },
+  "dependencies": { "ws": "^8.18.0" }
+}

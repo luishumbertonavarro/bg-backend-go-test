@@ -1,0 +1,255 @@
+<section class="panel">
+  <p class="hint">{{ backend().hint }}</p>
+
+  <!-- ------------------------------------------------------ conexión -->
+  <div class="card">
+    <div class="row">
+      <label class="grow">
+        URL del WebSocket
+        <input type="text" [ngModel]="url()" (ngModelChange)="url.set($event)"
+               placeholder="ws://localhost:8084/ws" spellcheck="false" />
+      </label>
+      <div class="status" [class]="'st-' + ws.status()">
+        <span class="dot"></span>{{ statusLabel() }}
+      </div>
+    </div>
+
+    <label>
+      Token JWT de prueba
+      <textarea rows="2" [ngModel]="token()" (ngModelChange)="token.set($event)"
+                placeholder="Pega aquí el JWT — genéralo con: node tools/gen-token.js"
+                spellcheck="false"></textarea>
+    </label>
+
+    <div class="row actions">
+      <button type="button" class="primary" (click)="connect()"
+              [disabled]="ws.status() === 'connected' || ws.status() === 'connecting'">Conectar</button>
+      <button type="button" (click)="disconnect()" [disabled]="ws.status() !== 'connected'">Desconectar</button>
+      @if (rejectDetail(); as detail) {
+        <span class="reject-detail">{{ detail }}</span>
+      }
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------ métricas -->
+  <div class="card">
+    <h3>Métricas en vivo</h3>
+    <div class="metrics">
+      <div class="metric">
+        <span class="k">Instancia</span>
+        <span class="v">{{ ws.instance() ?? '—' }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">Sesión</span>
+        <span class="v">{{ ws.sesion() ?? '—' }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">Handshake</span>
+        <span class="v">{{ ws.metrics().handshakeMs !== null ? (ws.metrics().handshakeMs | number:'1.0-2') + ' ms' : '—' }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">RTT último</span>
+        <span class="v">{{ ws.metrics().lastRttMs !== null ? (ws.metrics().lastRttMs | number:'1.0-2') + ' ms' : '—' }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">RTT medio</span>
+        <span class="v">{{ ws.metrics().avgRttMs !== null ? (ws.metrics().avgRttMs | number:'1.0-2') + ' ms' : '—' }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">RTT p95</span>
+        <span class="v">{{ ws.metrics().p95RttMs !== null ? (ws.metrics().p95RttMs | number:'1.0-2') + ' ms' : '—' }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">RTT mín / máx</span>
+        <span class="v">
+          {{ ws.metrics().minRttMs !== null ? (ws.metrics().minRttMs | number:'1.0-1') : '—' }} /
+          {{ ws.metrics().maxRttMs !== null ? (ws.metrics().maxRttMs | number:'1.0-1') : '—' }} ms
+        </span>
+      </div>
+      <div class="metric">
+        <span class="k">Throughput</span>
+        <span class="v">{{ ws.metrics().msgsPerSec }} msg/s</span>
+      </div>
+      <div class="metric">
+        <span class="k">Enviados / recibidos</span>
+        <span class="v">{{ ws.metrics().sent }} / {{ ws.metrics().received }}</span>
+      </div>
+      <div class="metric">
+        <span class="k">Muestras RTT</span>
+        <span class="v">{{ ws.metrics().samples }}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------ eco -->
+  <div class="card">
+    <h3>Mensaje de eco</h3>
+    <p class="hint">
+      El canal transporta JSON en ambos sentidos (SECURITY-CHECKLIST.md §4). Lo que escribas aquí
+      viaja como el campo <code>payload</code> del frame; el log de abajo muestra el JSON completo
+      que sale y el que vuelve.
+    </p>
+    <div class="row">
+      <input class="grow" type="text" [ngModel]="outgoing()" (ngModelChange)="outgoing.set($event)"
+             (keyup.enter)="send()" placeholder="Contenido del campo payload" />
+      <button type="button" class="primary" (click)="send()" [disabled]="ws.status() !== 'connected'">Enviar</button>
+      <button type="button" (click)="ping()" [disabled]="ws.status() !== 'connected'">Ping</button>
+      <button type="button" [class.active]="autoPing()" (click)="toggleAutoPing()"
+              [disabled]="ws.status() !== 'connected'">
+        {{ autoPing() ? 'Detener ping automático' : 'Ping automático 10/s' }}
+      </button>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------ puente con el .NET 4.8 -->
+  <div class="card">
+    <h3>Puente con el .NET 4.8</h3>
+    <p class="hint">
+      El canal tiene dos extremos. El .NET empuja a una sesión con
+      <code>POST /api/push</code> {{ '{' }} "sesion", "payload" {{ '}' }}, y lo que escribe el
+      cliente sale hacia el .NET con ese mismo sobre. Mientras no haya URL del .NET configurada,
+      los sobres se quedan aquí para poder verlos.
+    </p>
+
+    <div class="row wrap">
+      <input type="text" [ngModel]="pushText()" (ngModelChange)="pushText.set($event)"
+             placeholder="Texto que empujaría el .NET 4.8" spellcheck="false" />
+      <button type="button" (click)="sendPush()" [disabled]="!ws.sesion()">
+        Simular push del .NET 4.8
+      </button>
+      <button type="button" (click)="refreshOutbox()" [disabled]="!token()">
+        Ver lo que se enviaría al .NET
+      </button>
+    </div>
+
+    @if (outboxError(); as err) {
+      <p class="reject-detail">No se pudo consultar el outbox: {{ err }}</p>
+    }
+    @if (outboxUrl()) {
+      <p class="hint">Enviando de verdad a <code>{{ outboxUrl() }}</code>.</p>
+    } @else {
+      <p class="hint">
+        <code>WS_DOTNET_WEBHOOK_URL</code> está vacío: modo inspección, no se envía a ningún sitio.
+      </p>
+    }
+    @if (outbox().length) {
+      <pre class="frame">{{ outbox() | json }}</pre>
+    }
+  </div>
+
+  <!-- ------------------------------------------------------ sondas de seguridad -->
+  <div class="card">
+    <h3>Sondas de seguridad</h3>
+    <p class="hint">
+      Cada botón viola un control a propósito. El servidor debe rechazar y registrar el motivo;
+      la conexión debe cerrarse de forma controlada, sin tumbar el proceso.
+    </p>
+    <div class="row wrap">
+      <button type="button" (click)="probeRateLimit()" [disabled]="ws.status() !== 'connected'">Superar rate limit (4008)</button>
+      <button type="button" (click)="probeOversize()" [disabled]="ws.status() !== 'connected'">Mensaje &gt; 64 KB (4009)</button>
+      <button type="button" (click)="probeXss()" [disabled]="ws.status() !== 'connected'">Payload con &lt;script&gt; (4010)</button>
+      <button type="button" (click)="probeMalformed()" [disabled]="ws.status() !== 'connected'">JSON malformado (4010)</button>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------ carga -->
+  <div class="card">
+    <h3>Prueba de carga</h3>
+    <div class="row wrap">
+      <label class="small">
+        Conexiones
+        <input type="number" min="1" max="500"
+               [ngModel]="loadOpts().connections"
+               (ngModelChange)="setLoadOption('connections', +$event)" />
+      </label>
+      <label class="small">
+        Mensajes por conexión
+        <input type="number" min="1" max="200"
+               [ngModel]="loadOpts().msgsPerConnection"
+               (ngModelChange)="setLoadOption('msgsPerConnection', +$event)" />
+      </label>
+      <label class="small">
+        Msg/s por conexión
+        <input type="number" min="1" max="50"
+               [ngModel]="loadOpts().ratePerSec"
+               (ngModelChange)="setLoadOption('ratePerSec', +$event)" />
+      </label>
+      <button type="button" class="primary" (click)="runLoadTest()" [disabled]="load.running()">
+        {{ load.running() ? 'Ejecutando…' : 'Ejecutar prueba de carga' }}
+      </button>
+      @if (load.running()) {
+        <button type="button" (click)="load.cancel()">Cancelar</button>
+        <span class="progress">abiertas {{ load.progress().opened }} · terminadas {{ load.progress().closed }} / {{ load.progress().total }}</span>
+      }
+    </div>
+
+    @if (load.result(); as r) {
+      <table class="results">
+        <tbody>
+          <tr><th>Conexiones aceptadas</th><td>{{ r.accepted }} / {{ r.connections }}</td></tr>
+          <tr>
+            <th>Conexiones rechazadas</th>
+            <td>
+              {{ r.rejected }}
+              @for (e of rejectedByReasonEntries(); track e[0]) {
+                <span class="tag">{{ e[0] }}: {{ e[1] }}</span>
+              }
+            </td>
+          </tr>
+          <tr><th>Cerradas por el servidor durante la prueba</th><td>{{ r.closedByServerMidTest }}</td></tr>
+          <tr><th>Mensajes enviados / con eco</th><td>{{ r.messagesSent }} / {{ r.messagesEchoed }} (perdidos: {{ r.lostMessages }})</td></tr>
+          <tr><th>Handshake p50 / p95 / máx</th><td>{{ r.handshakeMs.p50 }} / {{ r.handshakeMs.p95 }} / {{ r.handshakeMs.max }} ms</td></tr>
+          <tr><th>RTT p50 / p95 / máx</th><td>{{ r.rttMs.p50 }} / {{ r.rttMs.p95 }} / {{ r.rttMs.max }} ms</td></tr>
+          <tr><th>Duración total</th><td>{{ r.totalSeconds }} s</td></tr>
+          <tr><th>Throughput medio</th><td>{{ r.avgMsgsPerSec }} msg/s</td></tr>
+          <tr [class.ok]="r.serverHealthyAfter" [class.bad]="!r.serverHealthyAfter">
+            <th>¿Servidor sano tras la carga?</th>
+            <td>{{ r.serverHealthyAfter ? 'Sí' : 'NO' }} — {{ r.healthDetail }}</td>
+          </tr>
+          @if (connectionsByInstanceEntries().length) {
+            <tr>
+              <th>Reparto por instancia</th>
+              <td>
+                @for (e of connectionsByInstanceEntries(); track e[0]) {
+                  <span class="tag">{{ e[0] }}: {{ e[1] }}</span>
+                }
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+      <p class="hint">
+        El navegador limita las conexiones simultáneas y compite por CPU. Para cifras de
+        referencia, contrasta con <code>node tools/loadtest.js</code>.
+      </p>
+    }
+  </div>
+
+  <!-- ------------------------------------------------------ log -->
+  <div class="card">
+    <div class="row between">
+      <h3>Log</h3>
+      <button type="button" (click)="clearLog()">Limpiar</button>
+    </div>
+    <div class="log">
+      @for (entry of log(); track entry.at + entry.text) {
+        <div class="entry" [class]="'lv-' + entry.level">
+          <div class="line">
+            <span class="ts">{{ time(entry.at) }}</span>
+            <span class="dir dir-{{ entry.direction }}">
+              {{ entry.direction === 'out' ? '→' : entry.direction === 'in' ? '←' : '•' }}
+            </span>
+            <!-- Interpolación: el contenido se renderiza SIEMPRE como texto, nunca como HTML. -->
+            <span class="txt">{{ entry.text }}</span>
+          </div>
+          @if (entry.json) {
+            <!-- El frame tal cual cruzó el cable. Interpolado: texto, nunca HTML. -->
+            <pre class="frame">{{ entry.json }}</pre>
+          }
+        </div>
+      } @empty {
+        <p class="empty">Sin actividad todavía.</p>
+      }
+    </div>
+  </div>
+</section>

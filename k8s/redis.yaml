@@ -1,0 +1,54 @@
+# Redis para enrutar los push entre replicas.
+#
+# La conexion WebSocket vive en la memoria de UN pod. Sin esto, un POST /api/push
+# que caiga en el pod que no tiene la sesion no llega a ninguna parte. Con Redis,
+# el push se publica en un canal, todas las replicas estan suscritas, y entrega la
+# que tenga la conexion.
+#
+# Es efimero a proposito: solo transporta, no almacena. Si Redis se reinicia no se
+# pierde ningun estado, porque las conexiones siguen en sus pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wspoc-redis
+  namespace: wspoc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wspoc-redis
+  template:
+    metadata:
+      labels:
+        app: wspoc-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["--save", "", "--appendonly", "no"] # sin persistencia: es un bus
+          ports:
+            - containerPort: 6379
+              name: redis
+          readinessProbe:
+            tcpSocket:
+              port: redis
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wspoc-redis
+  namespace: wspoc
+spec:
+  selector:
+    app: wspoc-redis
+  ports:
+    - port: 6379
+      targetPort: redis

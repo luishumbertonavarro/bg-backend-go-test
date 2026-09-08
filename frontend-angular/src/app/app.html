@@ -1,0 +1,31 @@
+<header class="topbar">
+  <div>
+    <h1>POC WebSocket — canal en Go</h1>
+    <p>
+      Angular 20 contra el backend Go, con el set de controles de
+      (<a href="https://localhost/SECURITY-CHECKLIST.md" onclick="return false">SECURITY-CHECKLIST.md</a>).
+      Genera un token con <code>node tools/gen-token.js</code> y pégalo en el panel.
+    </p>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  @for (b of backends; track b.id) {
+    <button type="button" role="tab" [attr.aria-selected]="active().id === b.id"
+            [class.active]="active().id === b.id" (click)="select(b)">
+      {{ b.label }}
+    </button>
+  }
+</nav>
+
+<main>
+  <!--
+    Los paneles se mantienen montados y solo se ocultan con CSS: así cada pestaña
+    conserva su conexión y sus métricas al cambiar de una a otra.
+  -->
+  @for (b of backends; track b.id) {
+    <div class="tabpanel" [class.hidden]="active().id !== b.id" role="tabpanel">
+      <app-backend-panel [backend]="b" />
+    </div>
+  }
+</main>

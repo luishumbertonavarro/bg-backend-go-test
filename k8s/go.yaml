@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wspoc-go
+  namespace: wspoc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: wspoc-go
+  template:
+    metadata:
+      labels:
+        app: wspoc-go
+    spec:
+      # El backend cierra las conexiones vivas al recibir SIGTERM (main.go), asi
+      # que se le da margen para hacerlo antes del SIGKILL.
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: wspoc-go
+          image: wspoc-go:poc
+          # La imagen se mete con `kind load docker-image`, no hay registry.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: wspoc-config
+            - secretRef:
+                name: wspoc-secret
+          env:
+            # Este es el hilo del que tira todo el experimento: el cliente recibe
+            # el nombre del pod en cada frame y en /health, y asi se ve que
+            # replica le atendio.
+            - name: WS_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # Sin esto la entrega es local y un push que caiga en el pod que no
+            # tiene la sesion se perderia. Ver k8s/redis.yaml.
+            - name: WS_REDIS_ADDR
+              value: wspoc-redis:6379
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wspoc-go
+  namespace: wspoc
+spec:
+  type: NodePort
+  # Por defecto kube-proxy reparte cada conexion TCP nueva de forma
+  # independiente. Como cada WebSocket es una conexion larga, el reparto entre
+  # replicas se ve directamente. Para el contraste del experimento 2 se cambia
+  # a sessionAffinity: ClientIP.
+  sessionAffinity: None
+  selector:
+    app: wspoc-go
+  ports:
+    - port: 8080
+      targetPort: http
+      nodePort: 30084
+      protocol: TCP

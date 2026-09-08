@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# Qué NO va al repositorio.
+#
+# Regla general: todo lo que se pueda regenerar con una compilación o una
+# instalación de dependencias. Quien clone este repo lo reconstruye entero con
+# .\start.ps1, que compila el binario de Go e instala las dependencias de Node.
+# ---------------------------------------------------------------------------
+
+# --- Node (frontend y tools) -----------------------------------------------
+node_modules/
+frontend-angular/dist/
+frontend-angular/.angular/
+npm-debug.log*
+yarn-error.log*
+
+# --- Go ---------------------------------------------------------------------
+# El binario lo compila start.ps1 en cada arranque.
+backend-go/wspoc-go.exe
+
+# --- Logs de ejecución -----------------------------------------------------
+# start.ps1 escribe aquí la salida del servidor.
+logs/
+*.log
+
+# --- Editores y sistema operativo ------------------------------------------
+.idea/
+*.swp
+*.user
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Lo que SÍ se versiona a propósito, aunque sorprenda:
+#
+#   .env                     Solo contiene un secreto JWT de prueba, y el servidor,
+#                            las herramientas y los manifiestos de k8s necesitan leer
+#                            los mismos valores para hablar el mismo idioma. En un
+#                            entorno real este fichero saldría del repositorio y el
+#                            secreto vendría de un gestor de secretos.
+#   frontend-angular/.vscode Configuración de arranque y depuración del scaffold de
+#                            Angular; es útil para quien clone y quiera depurar.
+# ---------------------------------------------------------------------------
