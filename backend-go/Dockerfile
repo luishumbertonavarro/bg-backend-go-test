@@ -9,7 +9,7 @@ COPY . .
 # ejecutar `go mod vendor` en el host.
 #
 # Sin cgo el binario es estatico y corre en una imagen sin libc.
-RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -trimpath -ldflags="-s -w" -o /out/wspoc-go .
+RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -trimpath -ldflags="-s -w" -o /out/wspoc-go ./cmd/server
 
 FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app

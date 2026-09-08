@@ -6,3 +6,6 @@ Dockerfile
 .dockerignore
 README.md
 start.ps1
+
+# La config entra por variables de entorno; el .env es solo para el host.
+.env
