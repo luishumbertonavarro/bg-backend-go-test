@@ -1,0 +1,8 @@
+# El binario compilado en Windows no sirve dentro de la imagen y solo la engorda.
+wspoc-go.exe
+wspoc-go
+*.exe
+Dockerfile
+.dockerignore
+README.md
+start.ps1

@@ -16,6 +16,8 @@ yarn-error.log*
 # --- Go ---------------------------------------------------------------------
 # El binario lo compila start.ps1 en cada arranque.
 backend-go/wspoc-go.exe
+# Go deja este temporal si no puede sobrescribir el .exe porque sigue en ejecucion.
+backend-go/wspoc-go.exe~
 
 # --- Logs de ejecución -----------------------------------------------------
 # start.ps1 escribe aquí la salida del servidor.
