@@ -8,7 +8,7 @@ import (
 	"wspoc-go/internal/protocol"
 )
 
-// Registry mantiene el contador global del tope anti-DoS (§7) y, además, el mapa
+// Registry mantiene el contador global del tope anti-DoS y, además, el mapa
 // de sesión -> conexiones que permite entregar a un usuario concreto.
 //
 // Una misma sesión puede tener varias conexiones (varias pestañas abiertas): la

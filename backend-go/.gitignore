@@ -1,0 +1,4 @@
+/vendor
+.env
+./certs/*.crt
+certs

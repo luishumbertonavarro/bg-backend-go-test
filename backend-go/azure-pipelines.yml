@@ -1,0 +1,27 @@
+trigger:
+  - develop
+  - staging
+  - release*
+  - main
+pr:
+  branches:
+    include:
+      - "*"
+resources:
+  repositories:
+    - repository: devops
+      name: BGA-DEVSECOPS/ci-templates
+      type: git
+      ref: refs/heads/main
+      endpoint: AzureDevOpsBancoGanadero
+
+extends:
+  template: templates/ci-golang.yml@devops
+  parameters:
+    teamName: "empresas"
+    projectName: "empresas"
+    applicationName: "websocket-gorilla"
+    golangVersion: "1.27"
+    coverageTestEnabled: "true"
+    portNumber: '8080'
+ 

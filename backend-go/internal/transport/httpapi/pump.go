@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -22,6 +23,8 @@ const (
 	// readLimitFactor multiplica el máximo para el tope duro de gorilla. El
 	// límite efectivo es el corte en streaming; este solo cubre un fallo de aquel.
 	readLimitFactor = 4
+	// pongWriteTimeout es el plazo para responder al ping de un cliente.
+	pongWriteTimeout = 2 * time.Second
 )
 
 // connection es el bucle de una conexión ya aceptada: idle timeout, tamaño,
@@ -56,10 +59,12 @@ func (c *connection) run() {
 
 	// Tope duro por si el corte en streaming fallase; el límite efectivo es el de abajo.
 	conn.SetReadLimit(c.server.cfg.MaxMessageBytes * readLimitFactor)
+	c.keepAlive(idle)
 
 	for {
-		// Idle timeout: la fecha límite NO se renueva con los pong, solo con datos
-		// reales (§7). Así una conexión "viva pero muda" también se cierra.
+		// Idle timeout: la fecha límite se renueva con los datos del cliente y con
+		// el latido de protocolo (ver keepAlive). Lo que cierra ahora es una
+		// conexión que no contesta, no uno que simplemente calla.
 		if err := conn.SetReadDeadline(time.Now().Add(idle)); err != nil {
 			return
 		}
@@ -72,6 +77,46 @@ func (c *connection) run() {
 			return
 		}
 	}
+}
+
+// keepAlive hace que el latido de protocolo renueve el plazo de lectura.
+//
+// Cambia lo que el idle timeout significa. Antes cerraba toda conexión que no
+// enviara datos de aplicación, incluida la sana que solo escucha —que es
+// justamente el caso de uso de este servicio: un navegador esperando un valor
+// que le llega por push—. Ahora cierra la que no CONTESTA al ping, que es la que
+// de verdad está muerta o inalcanzable.
+//
+// Lo que se pierde: una conexión abierta y silenciosa puede quedarse
+// indefinidamente. Lo que la acota ya no es el tiempo sino el cupo,
+// WS_MAX_CONNECTIONS.
+//
+// Los dos sentidos se atienden porque los clientes no son iguales: el navegador
+// solo responde pongs a nuestros pings (su JavaScript no puede enviar pings),
+// mientras que un cliente nativo —Postman, un k6— sí manda pings propios.
+func (c *connection) keepAlive(idle time.Duration) {
+	conn := c.client.Conn()
+	renovar := func() error { return conn.SetReadDeadline(time.Now().Add(idle)) }
+
+	conn.SetPongHandler(func(string) error { return renovar() })
+
+	// Este handler sustituye al de gorilla, que responde el pong. Hay que seguir
+	// respondiéndolo: sin pong, el cliente que nos hace ping nos da por muertos.
+	conn.SetPingHandler(func(data string) error {
+		_ = renovar()
+		err := conn.WriteControl(
+			websocket.PongMessage, []byte(data), time.Now().Add(pongWriteTimeout))
+		if errors.Is(err, websocket.ErrCloseSent) {
+			return nil
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			// Un pong que no cabe ahora no es motivo para tirar la conexión: el
+			// idle timeout ya se encarga si el cliente resulta estar muerto.
+			return nil
+		}
+		return err
+	})
 }
 
 // readFrame lee el siguiente mensaje de texto. El bool dice si se puede seguir.
@@ -94,7 +139,7 @@ func (c *connection) readFrame() ([]byte, bool) {
 	}
 
 	// Corte en streaming: se lee un byte más que el máximo; si llega, el frame
-	// se descarta sin haberlo materializado entero en memoria (§5).
+	// se descarta sin haberlo materializado entero en memoria.
 	max := c.server.cfg.MaxMessageBytes
 	raw, err := io.ReadAll(io.LimitReader(reader, max+1))
 	if err != nil {
@@ -140,8 +185,12 @@ func (c *connection) respond(msg protocol.ClientMessage) {
 	}
 
 	c.client.Enqueue(c.server.framer.Echo(msg.ID, msg.Payload, sessionID))
-	// El mensaje del cliente viaja al .NET 4.8 en el sobre {sesion, payload}.
-	c.server.outbox.Add(protocol.Envelope{Session: sessionID, Payload: msg.Payload})
+	// El mensaje del cliente viaja al .NET 4.8 en el sobre {Sesion, Payload}.
+	// Va como cadena JSON: el frontend manda texto, no un objeto como el .NET.
+	c.server.outbox.Add(protocol.Envelope{
+		Session: sessionID,
+		Payload: protocol.RawText(msg.Payload),
+	})
 }
 
 // reject registra el rechazo con el contexto de esta conexión.

@@ -102,11 +102,11 @@ func (s *Server) acceptConnection(w http.ResponseWriter, r *http.Request, verdic
 		return
 	}
 
-	client := session.NewClient(conn, verdict.Session, uuid.NewString()[:connIDLen])
+	client := session.NewClient(conn, verdict.Session, uuid.NewString()[:connIDLen], s.cfg.PingInterval())
 	s.registry.Bind(client)
 	logging.Accept(client.ConnID(), remote, verdict.Subject, verdict.Session, active)
 
-	// Aislamiento de fallos: un pánico en una conexión no debe tumbar el proceso (§7).
+	// Aislamiento de fallos: un pánico en una conexión no debe tumbar el proceso.
 	defer func() {
 		if rec := recover(); rec != nil {
 			logging.RejectRaw("CONNECTION_FAULT", 1011, remote, origin, logging.Detail(rec))

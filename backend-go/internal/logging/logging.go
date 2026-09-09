@@ -1,4 +1,4 @@
-// Package logging concentra el formato de los eventos del POC (§8).
+// Package logging concentra el formato de los eventos auditables del servicio.
 //
 // Antes, cada punto de rechazo montaba a mano una cadena
 // "[REJECT] stack=go reason=%s code=%d remote=%s origin=%s detail=%s". Estaba
@@ -28,7 +28,7 @@ func Setup() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
 
-// Reject registra un rechazo. Es el evento auditable del §8: todo camino que
+// Reject registra un rechazo. Es el evento auditable central: todo camino que
 // niegue el servicio pasa por aquí.
 func Reject(rejection protocol.Rejection, remote, origin, detail string) {
 	log.Printf("[REJECT] stack=%s reason=%s code=%d remote=%s origin=%s detail=%s",
@@ -62,6 +62,16 @@ func Push(session string, conns, payloadBytes int) {
 // PushFromRedis registra una entrega que llegó publicada por otra réplica.
 func PushFromRedis(session string, conns int) {
 	log.Printf("[PUSH] stack=%s sesion=%s conns=%d origen=redis", stack, session, conns)
+}
+
+// Token registra la emisión de un token del intercambio SESION -> JWT.
+//
+// Es un evento auditable de pleno derecho: es el punto donde una SESION pasa a
+// tener acceso al canal, así que cada emisión tiene que quedar rastreada igual
+// que quedan los rechazos.
+func Token(session, remote, origin string, ttlSeconds int) {
+	log.Printf("[TOKEN] stack=%s sesion=%s remote=%s origin=%s ttl=%ds",
+		stack, session, orDash(remote), orDash(origin), ttlSeconds)
 }
 
 // Outbox registra el sobre que se le enviaría (o se le envió) al .NET 4.8.

@@ -1,7 +1,8 @@
 // Command server arranca el backend WebSocket del POC.
 //
-// Implementa el mismo contrato de seguridad que los backends .NET 10, Java y
-// Python (ver SECURITY-CHECKLIST.md).
+// El servicio mantiene el canal con los navegadores y hace de puente con el
+// backend .NET 4.8, que es donde vive la lógica de negocio: le reenvía por el
+// outbox lo que manda el cliente y entrega a la sesión lo que el .NET empuja.
 //
 // Este fichero es el ÚNICO sitio donde se construyen las dependencias y se
 // deciden sus implementaciones concretas. Todo lo demás las recibe ya resueltas,

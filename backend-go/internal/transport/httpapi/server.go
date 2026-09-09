@@ -37,13 +37,17 @@ const socketBufferSize = 8192
 type Server struct {
 	cfg         config.Config
 	guard       security.Guard
+	issuer      security.Issuer
 	validator   protocol.Validator
 	framer      protocol.Framer
 	registry    *session.Registry
 	deliverer   delivery.Deliverer
 	outbox      *outbox.Outbox
 	pushLimiter *ratelimit.SlidingWindow
-	upgrader    websocket.Upgrader
+	// tokenLimiter tiene cupo propio: el intercambio lo llama el navegador y no
+	// puede competir por el mismo cupo que el puente con el .NET.
+	tokenLimiter *ratelimit.SlidingWindow
+	upgrader     websocket.Upgrader
 }
 
 // Deps son las dependencias que el arranque construye y el servidor consume.
@@ -60,14 +64,16 @@ type Deps struct {
 // New construye el servidor con sus dependencias ya resueltas.
 func New(deps Deps) *Server {
 	return &Server{
-		cfg:         deps.Config,
-		guard:       security.NewGuard(deps.Config),
-		validator:   protocol.NewValidator(deps.Config.MaxMessageBytes),
-		framer:      protocol.NewFramer(deps.Config.InstanceID),
-		registry:    deps.Registry,
-		deliverer:   deps.Deliverer,
-		outbox:      deps.Outbox,
-		pushLimiter: ratelimit.NewSlidingWindow(deps.Config.PushRateLimitPerSec),
+		cfg:          deps.Config,
+		guard:        security.NewGuard(deps.Config),
+		issuer:       security.NewIssuer(deps.Config),
+		validator:    protocol.NewValidator(deps.Config.MaxMessageBytes),
+		framer:       protocol.NewFramer(deps.Config.InstanceID),
+		registry:     deps.Registry,
+		deliverer:    deps.Deliverer,
+		outbox:       deps.Outbox,
+		pushLimiter:  ratelimit.NewSlidingWindow(deps.Config.PushRateLimitPerSec),
+		tokenLimiter: ratelimit.NewSlidingWindow(deps.Config.SessionTokenRateLimitPerSec),
 		upgrader: websocket.Upgrader{
 			HandshakeTimeout: handshakeTimeout,
 			ReadBufferSize:   socketBufferSize,
@@ -85,6 +91,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/api/push", s.handlePush)
+	mux.HandleFunc("/api/session-token", s.handleSessionToken)
 	mux.HandleFunc("/api/outbox", s.handleOutbox)
 	return mux
 }

@@ -1,5 +1,5 @@
-// Package config carga la configuración compartida por los cuatro backends del
-// POC (SECURITY-CHECKLIST.md §0).
+// Package config carga la configuración del servicio: el .env de la raíz y las
+// variables de entorno, que tienen prioridad sobre él.
 //
 // No depende de ningún otro paquete del proyecto: es la hoja del grafo de
 // dependencias, así que cualquier capa puede importarlo sin crear ciclos.
@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config es la configuración efectiva del proceso.
@@ -34,10 +35,14 @@ type Config struct {
 	PushRateLimitPerSec  int
 	OutboxSize           int
 	RedisAddr            string // vacío = entrega local, una réplica
+
+	// Intercambio SESION -> token para el frontend.
+	SessionTokenTTLSeconds      int
+	SessionTokenRateLimitPerSec int
 }
 
 // minSecretBytes es la longitud mínima del secreto HS256. Por debajo de 32 bytes
-// la firma es forzable por fuerza bruta y el control del §2 dejaría de sostenerse.
+// la firma es forzable por fuerza bruta y la validación del token dejaría de sostenerse.
 const minSecretBytes = 32
 
 // Load lee el .env y las variables de entorno, que tienen prioridad.
@@ -96,6 +101,13 @@ func Load() (Config, error) {
 		PushRateLimitPerSec:  getInt("WS_PUSH_RATE_LIMIT_PER_SEC", 100),
 		OutboxSize:           getInt("WS_OUTBOX_SIZE", 200),
 		RedisAddr:            get("WS_REDIS_ADDR", ""),
+
+		// La vigencia por defecto acompaña a la sesión de login: un token por
+		// login, reutilizable en las reconexiones.
+		SessionTokenTTLSeconds: getInt("WS_SESSION_TOKEN_TTL_SECONDS", 3600),
+		// Tope propio, no compartido con el push: este endpoint lo llama el
+		// navegador, así que es la superficie pública del servicio.
+		SessionTokenRateLimitPerSec: getInt("WS_SESSION_TOKEN_RATE_LIMIT_PER_SEC", 20),
 	}, nil
 }
 
@@ -119,6 +131,26 @@ func (c Config) OriginList() []string {
 
 // Addr es la dirección de escucha del servidor.
 func (c Config) Addr() string { return fmt.Sprintf("%s:%d", c.BindAddress, c.Port) }
+
+// minPingInterval evita un latido degenerado si alguien configura un idle
+// timeout diminuto: un ticker de 0 entra en pánico, y uno de milisegundos
+// inundaría el socket de pings.
+const minPingInterval = time.Second
+
+// PingInterval es cada cuánto el servidor manda un ping de protocolo para
+// mantener viva la conexión.
+//
+// Se deriva del idle timeout en vez de configurarse aparte: son la misma
+// decisión vista desde los dos lados, y dos ajustes independientes solo
+// permitirían dejarlos incoherentes (un latido más lento que el plazo cerraría
+// conexiones sanas). La mitad da margen para perder un ping sin morir.
+func (c Config) PingInterval() time.Duration {
+	interval := time.Duration(c.IdleTimeoutSeconds) * time.Second / 2
+	if interval < minPingInterval {
+		return minPingInterval
+	}
+	return interval
+}
 
 // instanceID identifica la réplica que atiende. En k8s se inyecta el nombre del
 // pod; fuera de k8s el hostname ya distingue máquinas.

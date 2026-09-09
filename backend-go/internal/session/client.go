@@ -15,7 +15,7 @@ import (
 // Plazos de escritura.
 const (
 	// writeTimeout es el backpressure: si el cliente no drena en este tiempo, la
-	// escritura falla y se cierra la conexión en vez de acumular memoria (§7).
+	// escritura falla y se cierra la conexión en vez de acumular memoria.
 	writeTimeout = 5 * time.Second
 	// flushTimeout es más corto porque solo se usa al cerrar, cuando ya no
 	// interesa esperar a un cliente que probablemente se ha ido.
@@ -40,6 +40,8 @@ type Client struct {
 	out     chan []byte
 	session string
 	connID  string
+	// pingInterval es cada cuánto writePump manda un ping de protocolo.
+	pingInterval time.Duration
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -53,14 +55,19 @@ type Client struct {
 //
 // Arrancarla aquí, y no en el llamante, hace imposible el estado intermedio en
 // el que existe un Client cuya cola nadie está drenando.
-func NewClient(conn *websocket.Conn, session, connID string) *Client {
+func NewClient(conn *websocket.Conn, session, connID string, pingInterval time.Duration) *Client {
+	// Un intervalo no positivo haría entrar en pánico al ticker de writePump.
+	if pingInterval <= 0 {
+		pingInterval = time.Second
+	}
 	c := &Client{
-		conn:     conn,
-		out:      make(chan []byte, outBuffer),
-		session:  session,
-		connID:   connID,
-		done:     make(chan struct{}),
-		finished: make(chan struct{}),
+		conn:         conn,
+		out:          make(chan []byte, outBuffer),
+		session:      session,
+		connID:       connID,
+		pingInterval: pingInterval,
+		done:         make(chan struct{}),
+		finished:     make(chan struct{}),
 	}
 	go c.writePump()
 	return c
@@ -77,7 +84,7 @@ func (c *Client) ConnID() string { return c.connID }
 func (c *Client) Conn() *websocket.Conn { return c.conn }
 
 // Enqueue encola un frame. Devuelve false si la cola está llena: el cliente no
-// drena y hay que cerrarlo en vez de acumular memoria (§7 backpressure).
+// drena y hay que cerrarlo en vez de acumular memoria (backpressure).
 func (c *Client) Enqueue(frame protocol.Frame) bool {
 	raw, err := json.Marshal(frame)
 	if err != nil {
@@ -93,13 +100,22 @@ func (c *Client) Enqueue(frame protocol.Frame) bool {
 	}
 }
 
-// writePump es la única goroutine que escribe en el socket.
+// writePump es la única goroutine que escribe en el socket, y también la que
+// lleva el latido.
 func (c *Client) writePump() {
 	defer close(c.finished)
+
+	ping := time.NewTicker(c.pingInterval)
+	defer ping.Stop()
+
 	for {
 		select {
 		case <-c.done:
 			return
+		case <-ping.C:
+			if !c.ping() {
+				return
+			}
 		case raw, ok := <-c.out:
 			if !ok {
 				return
@@ -109,6 +125,21 @@ func (c *Client) writePump() {
 			}
 		}
 	}
+}
+
+// ping manda un PING de protocolo. Devuelve false si hay que abandonar.
+//
+// Lo manda el SERVIDOR, no el cliente, y esa dirección es la que importa: el
+// JavaScript de un navegador no puede enviar pings —la API de WebSocket no lo
+// expone—, pero sí responde el pong automáticamente. Así el latido funciona sin
+// una línea de código en el frontend.
+//
+// Va aquí y no en la goroutine de lectura para no romper la disciplina de un
+// único escritor, aunque WriteControl sea seguro en concurrencia: tenerlo en un
+// solo sitio es lo que hace la regla comprobable de un vistazo.
+func (c *Client) ping() bool {
+	return c.conn.WriteControl(
+		websocket.PingMessage, nil, time.Now().Add(writeTimeout)) == nil
 }
 
 // write hace una escritura con plazo. Devuelve false si hay que abandonar.

@@ -15,9 +15,12 @@ import (
 var errTooLarge = errors.New("cuerpo demasiado grande")
 
 // pushResponse confirma una entrega.
+//
+// `Sesion` va con la grafía del .NET, igual que en la peticion: quien llama
+// deserializa la respuesta con el mismo modelo con el que serializo el sobre.
 type pushResponse struct {
 	Delivered int    `json:"delivered"`
-	Session   string `json:"sesion"`
+	Session   string `json:"Sesion"`
 	Instance  string `json:"instance"`
 }
 
@@ -58,7 +61,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 // deliverPush entrega el sobre a las conexiones de la sesión.
 func (s *Server) deliverPush(w http.ResponseWriter, r *http.Request, env protocol.Envelope) {
-	frame := s.framer.Push(env.Payload, env.Session)
+	frame := s.framer.Push(env.Payload, env.Session, env.Identificador)
 
 	delivered := s.deliverer.Deliver(env.Session, frame)
 	if delivered == 0 {
@@ -67,7 +70,7 @@ func (s *Server) deliverPush(w http.ResponseWriter, r *http.Request, env protoco
 		// para reintentarla, no solo que algo falló.
 		writeJSON(w, http.StatusNotFound, map[string]any{
 			"reason": protocol.SessionNotFound.Reason,
-			"sesion": env.Session,
+			"Sesion": env.Session,
 		})
 		return
 	}
@@ -80,10 +83,15 @@ func (s *Server) deliverPush(w http.ResponseWriter, r *http.Request, env protoco
 	})
 }
 
-// authorize aplica el mismo control de token que el handshake (§2), pero leyendo
-// la cabecera: el .NET no es un navegador, así que sí puede enviar cabeceras.
+// authorize aplica el control de token del puente, leyendo la cabecera: el .NET
+// no es un navegador, así que sí puede enviar cabeceras.
+//
+// Es CheckBridgeToken y no CheckToken: este endpoint elige a qué sesión entrega,
+// así que un token del intercambio —que se le da a cualquiera que traiga una
+// SESION— no puede valer aquí. Lo mismo rige para el outbox, que lee lo que los
+// clientes enviaron.
 func (s *Server) authorize(w http.ResponseWriter, r *http.Request, detail string) bool {
-	verdict := s.guard.CheckToken(security.BearerToken(r.Header.Get("Authorization")))
+	verdict := s.guard.CheckBridgeToken(security.BearerToken(r.Header.Get("Authorization")))
 	if verdict.Allowed {
 		return true
 	}
@@ -119,7 +127,7 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 }
 
 // readLimited lee el cuerpo cortando un byte por encima del máximo, igual que
-// hace el canal WebSocket con los frames grandes (§5).
+// hace el canal WebSocket con los frames grandes.
 //
 // Cortar en streaming y no medir después es lo que hace que el límite proteja:
 // leer el cuerpo entero para luego rechazarlo permitiría tumbar el proceso

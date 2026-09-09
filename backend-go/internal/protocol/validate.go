@@ -16,9 +16,9 @@ var errTrailingContent = errors.New("contenido sobrante tras el documento JSON")
 // variable de paquete, y cualquier llamante podría alterarla para todo el proceso.
 func rejected(r Rejection) *Rejection { return &r }
 
-// Límites del contrato (§4). Son del protocolo, no del despliegue, así que viven
-// aquí y no en la configuración: cambiarlos cambia lo que los cuatro backends
-// aceptan, no cómo se despliega este.
+// Límites del contrato. Son del protocolo, no del despliegue, así que viven
+// aquí y no en la configuración: cambiarlos cambia lo que el canal acepta, no
+// cómo se despliega el servicio.
 const (
 	maxPayloadChars = 8192
 	maxIDChars      = 64
@@ -32,7 +32,7 @@ const (
 // evidente antes de que se propague.
 var scriptPatterns = []string{"<script", "javascript:", "onerror=", "onload=", "<iframe", "data:text/html"}
 
-// Validator aplica las reglas del §4. Recibe el límite de tamaño por inyección
+// Validator aplica las reglas del contrato. Recibe el límite de tamaño por inyección
 // para no depender del paquete de configuración.
 type Validator struct {
 	MaxMessageBytes int64
@@ -43,7 +43,7 @@ func NewValidator(maxMessageBytes int64) Validator {
 	return Validator{MaxMessageBytes: maxMessageBytes}
 }
 
-// Message valida y sanea un frame entrante del cliente (§4).
+// Message valida y sanea un frame entrante del cliente.
 //
 // Devuelve un *Rejection nil cuando el mensaje es válido; así el llamante no
 // puede olvidarse de comprobar el resultado, como pasaba con el `reason string`
@@ -73,7 +73,7 @@ func (v Validator) Message(raw []byte) (ClientMessage, *Rejection) {
 	return msg, nil
 }
 
-// Envelope valida el sobre {sesion, payload} que manda el .NET 4.8.
+// Envelope valida el sobre {Sesion, Identificador, Payload} que manda el .NET 4.8.
 //
 // Aplica la misma sanitización que el canal WebSocket a propósito: el push acaba
 // en el DOM del navegador igual que un eco, así que no puede ser un camino más laxo.
@@ -85,10 +85,34 @@ func (v Validator) Envelope(raw []byte) (Envelope, *Rejection) {
 	if !isValidID(env.Session, maxSessionChars) {
 		return Envelope{}, rejected(InvalidSession)
 	}
-	if !isCleanText(env.Payload) {
+	// Un Payload ausente deja el crudo a nil. Se rechaza en vez de entregar un
+	// frame sin contenido: quien empuja siempre tiene algo que decir.
+	if len(env.Payload) == 0 {
+		return Envelope{}, rejected(InvalidPayload)
+	}
+	// El saneado se aplica al JSON ya serializado, no a un texto suelto: es
+	// exactamente lo que acabará en el DOM del navegador, así que es lo que hay
+	// que revisar. Que sea JSON válido lo garantiza el propio decodificador.
+	if !isCleanText(string(env.Payload)) {
 		return Envelope{}, rejected(InvalidPayload)
 	}
 	return env, nil
+}
+
+// SessionTokenRequest valida el {SESION} que manda el frontend al intercambio.
+//
+// Aplica al identificador exactamente la misma regla que el sobre del push: si
+// una SESION no valdría para entregar, tampoco puede valer para emitir el token
+// que la va a representar en el canal.
+func (v Validator) SessionTokenRequest(raw []byte) (SessionTokenRequest, *Rejection) {
+	var req SessionTokenRequest
+	if err := decodeStrict(raw, &req); err != nil {
+		return SessionTokenRequest{}, rejected(InvalidPayload)
+	}
+	if !isValidID(req.Session, maxSessionChars) {
+		return SessionTokenRequest{}, rejected(InvalidSession)
+	}
+	return req, nil
 }
 
 // decodeStrict decodifica con esquema cerrado: cualquier campo fuera del

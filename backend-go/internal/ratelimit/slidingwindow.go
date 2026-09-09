@@ -1,4 +1,4 @@
-// Package ratelimit implementa el control de caudal del §6.
+// Package ratelimit implementa el control de caudal: un tope de eventos por segundo.
 package ratelimit
 
 import (
