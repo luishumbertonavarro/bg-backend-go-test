@@ -13,9 +13,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"wspoc-go/internal/bridge"
 	"wspoc-go/internal/config"
-	"wspoc-go/internal/delivery"
-	"wspoc-go/internal/outbox"
 	"wspoc-go/internal/protocol"
 	"wspoc-go/internal/ratelimit"
 	"wspoc-go/internal/security"
@@ -35,15 +34,15 @@ const socketBufferSize = 8192
 // leyéndolo entero, y no había forma de levantar dos configuraciones distintas
 // en un test. Aquí las dependencias son explícitas y se inyectan al construir.
 type Server struct {
-	cfg         config.Config
-	guard       security.Guard
-	issuer      security.Issuer
-	validator   protocol.Validator
-	framer      protocol.Framer
-	registry    *session.Registry
-	deliverer   delivery.Deliverer
-	outbox      *outbox.Outbox
-	pushLimiter *ratelimit.SlidingWindow
+	cfg       config.Config
+	guard     security.Guard
+	issuer    security.Issuer
+	validator protocol.Validator
+	framer    protocol.Framer
+	registry  *session.Registry
+	// bridge es la llamada síncrona al .NET 4.8 que atiende las `peticion` del
+	// canal. Es la única salida del servicio hacia fuera.
+	bridge *bridge.Bridge
 	// tokenLimiter tiene cupo propio: el intercambio lo llama el navegador y no
 	// puede competir por el mismo cupo que el puente con el .NET.
 	tokenLimiter *ratelimit.SlidingWindow
@@ -55,10 +54,9 @@ type Server struct {
 // Es un struct con nombres en vez de siete parámetros posicionales: con tantos
 // del mismo tipo, un intercambio accidental compilaría sin protestar.
 type Deps struct {
-	Config    config.Config
-	Registry  *session.Registry
-	Deliverer delivery.Deliverer
-	Outbox    *outbox.Outbox
+	Config   config.Config
+	Registry *session.Registry
+	Bridge   *bridge.Bridge
 }
 
 // New construye el servidor con sus dependencias ya resueltas.
@@ -70,9 +68,7 @@ func New(deps Deps) *Server {
 		validator:    protocol.NewValidator(deps.Config.MaxMessageBytes),
 		framer:       protocol.NewFramer(deps.Config.InstanceID),
 		registry:     deps.Registry,
-		deliverer:    deps.Deliverer,
-		outbox:       deps.Outbox,
-		pushLimiter:  ratelimit.NewSlidingWindow(deps.Config.PushRateLimitPerSec),
+		bridge:       deps.Bridge,
 		tokenLimiter: ratelimit.NewSlidingWindow(deps.Config.SessionTokenRateLimitPerSec),
 		upgrader: websocket.Upgrader{
 			HandshakeTimeout: handshakeTimeout,
@@ -90,9 +86,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/ws", s.handleWS)
-	mux.HandleFunc("/api/push", s.handlePush)
 	mux.HandleFunc("/api/session-token", s.handleSessionToken)
-	mux.HandleFunc("/api/outbox", s.handleOutbox)
 	return mux
 }
 

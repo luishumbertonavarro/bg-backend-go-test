@@ -54,16 +54,6 @@ func Close(connID string, active int32) {
 	log.Printf("[CLOSE] stack=%s conn=%s active=%d", stack, connID, active)
 }
 
-// Push registra una entrega del .NET 4.8 hacia las conexiones de una sesión.
-func Push(session string, conns, payloadBytes int) {
-	log.Printf("[PUSH] stack=%s sesion=%s conns=%d bytes=%d", stack, session, conns, payloadBytes)
-}
-
-// PushFromRedis registra una entrega que llegó publicada por otra réplica.
-func PushFromRedis(session string, conns int) {
-	log.Printf("[PUSH] stack=%s sesion=%s conns=%d origen=redis", stack, session, conns)
-}
-
 // Token registra la emisión de un token del intercambio SESION -> JWT.
 //
 // Es un evento auditable de pleno derecho: es el punto donde una SESION pasa a
@@ -74,9 +64,17 @@ func Token(session, remote, origin string, ttlSeconds int) {
 		stack, session, orDash(remote), orDash(origin), ttlSeconds)
 }
 
-// Outbox registra el sobre que se le enviaría (o se le envió) al .NET 4.8.
-func Outbox(raw []byte) {
-	log.Printf("[OUTBOX] stack=%s %s", stack, raw)
+// Peticion registra un viaje completo al .NET 4.8: lo que subio por el canal, lo
+// que contesto el backend y cuanto tardo.
+//
+// Se registra el camino FELIZ, no solo el fallo. Sin esta linea, una peticion que
+// funciona no deja rastro en ningun sitio: el unico modo de saber si el .NET
+// llego a procesarla era mirar los logs del propio .NET, que no siempre se
+// tienen delante. El tiempo va aqui porque es lo que decide si
+// WS_DOTNET_TIMEOUT_SECONDS esta bien puesto.
+func Peticion(session, id string, ms int64, bytesEnviados, bytesRecibidos int) {
+	log.Printf("[PETICION] stack=%s sesion=%s id=%s ms=%d envio=%dB recibio=%dB",
+		stack, session, id, ms, bytesEnviados, bytesRecibidos)
 }
 
 // Infof registra un evento operativo sin formato de auditoría: arranque,

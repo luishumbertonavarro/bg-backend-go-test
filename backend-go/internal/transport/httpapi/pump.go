@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"wspoc-go/internal/bridge"
 	"wspoc-go/internal/logging"
 	"wspoc-go/internal/protocol"
 	"wspoc-go/internal/ratelimit"
@@ -179,18 +181,100 @@ func (c *connection) process(raw []byte) bool {
 func (c *connection) respond(msg protocol.ClientMessage) {
 	sessionID := c.client.Session()
 
-	if msg.Type == protocol.TypePing {
+	switch msg.Type {
+	case protocol.TypePing:
 		c.client.Enqueue(c.server.framer.Pong(msg.ID, sessionID))
+
+	case protocol.TypePeticion:
+		// En una goroutine porque la llamada al .NET puede tardar segundos y este
+		// es el bucle de LECTURA de la conexión: bloquearlo dejaría al cliente sin
+		// poder mandar ni un ping, y moriría por idle timeout esperando su propia
+		// respuesta. El tope de concurrencia lo pone el semáforo del puente, no
+		// esta goroutine.
+		go c.consultarBackend(msg, sessionID)
+
+	default:
+		// El eco devuelve al cliente su propio payload y no sale del proceso.
+		// Sirve para comprobar que el canal está vivo sin depender del .NET.
+		c.client.Enqueue(c.server.framer.Echo(msg.ID, msg.Payload, sessionID))
+	}
+}
+
+// consultarBackend pregunta al .NET 4.8 y entrega su respuesta a la sesión.
+func (c *connection) consultarBackend(msg protocol.ClientMessage, sessionID string) {
+	// El contexto acota la espera aunque el cliente se vaya: la llamada ya está
+	// en vuelo y ocupa un hueco del semáforo, así que tiene que terminar sola.
+	ctx, cancel := context.WithTimeout(context.Background(),
+		time.Duration(c.server.cfg.DotNetTimeoutSeconds)*time.Second)
+	defer cancel()
+
+	inicio := time.Now()
+	respuesta, err := c.server.bridge.Ask(ctx, protocol.Envelope{
+		Session: sessionID,
+		Payload: msg.Payload,
+	})
+	if err != nil {
+		rejection := rechazoDelPuente(err)
+		logging.Reject(rejection, c.remote, "", "peticion id="+msg.ID+" "+err.Error())
+		// Se entrega por el registro y no directamente a esta conexión para que el
+		// error siga el mismo camino que la respuesta: si el cliente se reconectó
+		// mientras esperaba, lo recibe igual.
+		c.server.registry.Deliver(sessionID, c.server.framer.ErrorEn(msg.ID, rejection, sessionID))
 		return
 	}
 
-	c.client.Enqueue(c.server.framer.Echo(msg.ID, msg.Payload, sessionID))
-	// El mensaje del cliente viaja al .NET 4.8 en el sobre {Sesion, Payload}.
-	// Va como cadena JSON: el frontend manda texto, no un objeto como el .NET.
-	c.server.outbox.Add(protocol.Envelope{
-		Session: sessionID,
-		Payload: protocol.RawText(msg.Payload),
-	})
+	destino := c.destinoDeLaRespuesta(respuesta, sessionID, msg.ID)
+	if destino == "" {
+		// La respuesta se descarta, pero el cliente sigue esperándola: sin avisarle
+		// se quedaría colgado hasta su propio timeout, y en los logs no habría nada
+		// del lado del navegador que explicara el silencio.
+		c.server.registry.Deliver(sessionID,
+			c.server.framer.ErrorEn(msg.ID, protocol.BackendError, sessionID))
+		return
+	}
+
+	logging.Peticion(sessionID, msg.ID, time.Since(inicio).Milliseconds(),
+		len(msg.Payload), len(respuesta.Payload))
+
+	frame := c.server.framer.Respuesta(msg.ID, respuesta.Payload, destino)
+	if entregados := c.server.registry.Deliver(destino, frame); entregados == 0 {
+		// No es un error del .NET: el cliente se fue mientras se le calculaba la
+		// respuesta. Se registra porque, si pasa mucho, el .NET tarda de más.
+		logging.Reject(protocol.SessionNotFound, c.remote, "", "respuesta huérfana sesion="+destino)
+	}
+}
+
+// destinoDeLaRespuesta decide a qué sesión va la respuesta del .NET.
+//
+// La regla, en orden: sin `Sesion` se usa la de origen —Go ya sabe quién
+// preguntó, así que el .NET no tiene por qué repetirlo—; con la misma, se
+// entrega; con una DISTINTA, se descarta. En un round-trip síncrono no hay razón
+// legítima para que difiera, y obedecerla convertiría un fallo del .NET en la
+// respuesta de un usuario entregada a otro. Para empujar a una sesión ajena está
+// POST /api/push, que es el camino pensado para eso.
+//
+// Devuelve la cadena vacía cuando hay que descartar.
+func (c *connection) destinoDeLaRespuesta(respuesta protocol.Envelope, origen, id string) string {
+	if respuesta.Session == "" || respuesta.Session == origen {
+		return origen
+	}
+	logging.RejectRaw("BACKEND_SESSION_MISMATCH", 4015, c.remote, "",
+		"peticion id="+id+" origen="+origen+" el .NET respondió sesion="+respuesta.Session)
+	return ""
+}
+
+// rechazoDelPuente traduce el fallo del puente al motivo que ve el cliente.
+func rechazoDelPuente(err error) protocol.Rejection {
+	switch {
+	case errors.Is(err, bridge.ErrSinDestino):
+		return protocol.BackendUnavailable
+	case errors.Is(err, bridge.ErrSaturado):
+		return protocol.BackendBusy
+	case errors.Is(err, bridge.ErrTimeout):
+		return protocol.BackendTimeout
+	default:
+		return protocol.BackendError
+	}
 }
 
 // reject registra el rechazo con el contexto de esta conexión.

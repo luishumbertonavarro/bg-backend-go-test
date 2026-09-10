@@ -1,90 +1,59 @@
 {
   "info": {
     "name": "bg-go — WebSocket POC (Go)",
-    "description": "Verificacion funcional del backend Go (net/http + gorilla/websocket).\n\nEndpoints HTTP: /health, /ws (diagnostico pre-upgrade), POST /api/push, GET /api/outbox.\n\nANTES DE NADA — pon tu secreto: Collection > Variables > jwtSecret > columna 'Current value' = el valor de WS_JWT_SECRET de tu .env. Usa 'Current value', NO 'Initial value': el Initial se exporta con el fichero y el .env esta en .gitignore precisamente para que el secreto no acabe versionado. Si no lo haces, todo lo autenticado responde 401 TOKEN_INVALID.\n\nHAY DOS TOKENS, y abren puertas distintas:\n\n  {{token}} — lo firma solo el pre-request script en CADA peticion, con {{jwtSecret}}. Es el token 'de backend': vale para POST /api/push, GET /api/outbox y tambien para /ws. No hay endpoint que lo genere, es un script.\n\n  {{tokenIntercambio}} — lo devuelve POST /api/session-token (carpeta 01b). Es el token 'de frontend': canjea una SESION por un token que abre SOLO /ws. En /api/push responde 401 a proposito (lleva la marca `canal`).\n\nEl JWT HS256 se firma en el pre-request script de la coleccion usando WS_JWT_SECRET, asi que no necesitas generar tokens fuera de Postman. Cada peticion puede pedir un token distinto poniendo la variable local `tokenMode` (valid | expired | badSignature | badAlgNone | badIssuer | badAudience | noExp).\n\nIMPORTANTE: el backend escucha en 127.0.0.1 (WS_BIND_ADDRESS). Si usas Postman en el navegador, cambia el agente de 'Cloud Agent' a 'Desktop Agent' o usa la app de escritorio; el agente en la nube no puede alcanzar una direccion loopback de tu maquina.\n\nCOMO PROBAR EL CIRCUITO COMPLETO\n\n  1. Levanta el backend y lanza '00 > GET /health' (debe dar 200)\n  2. Pon jwtSecret (Current value) y sid con la sesion que quieras usar\n  3. Lanza '01b > POST /api/session-token - camino feliz' -> deja el token en {{tokenIntercambio}}\n  4. New > WebSocket Request -> ws://127.0.0.1:8084/ws?token=<pega el valor de tokenIntercambio> -> Connect\n  5. Lanza '02 > POST /api/push - forma real del .NET'\n     -> debe responder 202 delivered:1 Y aparecer el frame {\"type\":\"push\",...} en la ventana del WebSocket\n\nEl paso 4 necesita la app de escritorio: las WebSocket Request no existen en Postman web y no se pueden lanzar desde una peticion normal de la coleccion.",
+    "description": "El contrato del gateway Go, en dos mitades: una para quien escribe el frontend y otra\npara quien mantiene el .NET 4.8.\n\n  frontend --WebSocket--> Go --POST--> .NET 4.8 (valida y toca BD)\n  frontend <--WebSocket-- Go <--misma respuesta HTTP--\n\nCada carpeta tiene un LEEME con el ciclo completo, las trampas y una lista de que\nprobar. Abre el que te toque y pasaselo a quien corresponda.\n\nANTES DE NADA — pon el secreto: Collection > Variables > jwtSecret > columna 'Current\nvalue' = el WS_JWT_SECRET de backend-go/.env. Usa 'Current value', NO 'Initial value':\nel Initial se exporta con el fichero y el secreto no debe acabar versionado.\n\nLO QUE NO SE PUEDE HACER AQUI: abrir el WebSocket. Postman solo lo ofrece como un tipo\nde peticion aparte (New > WebSocket Request), fuera de la coleccion y sin scripts. Las\npeticiones de aqui cubren las patas HTTP; el canal se abre a mano, y los mensajes\nexactos estan en el LEEME de la carpeta 01.\n\nPara automatizarlo entero sin Postman:\n  node tools/fake-dotnet.js     hace de .NET 4.8\n  node tools/peticion.js --ping ejerce el ciclo y comprueba que un fallo no cierra el canal",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "baseUrl", "value": "http://127.0.0.1:8084" },
-    { "key": "jwtSecret", "value": "poc-websocket-shared-secret-change-me-min-32-bytes" },
-    { "key": "jwtIssuer", "value": "ws-poc-issuer" },
-    { "key": "jwtAudience", "value": "ws-poc-clients" },
-    { "key": "sub", "value": "usuario-demo" },
-    { "key": "sid", "value": "sesion-demo" },
-    { "key": "allowedOrigin", "value": "http://localhost:4200" },
-    { "key": "token", "value": "" },
-    { "key": "tokenIntercambio", "value": "" }
-  ],
-  "event": [
     {
-      "listen": "prerequest",
-      "script": {
-        "type": "text/javascript",
-        "exec": [
-          "// Firma un JWT HS256 con CryptoJS (incluido en el sandbox de Postman).",
-          "function b64url(wordArray) {",
-          "  return CryptoJS.enc.Base64.stringify(wordArray)",
-          "    .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');",
-          "}",
-          "function b64urlJson(obj) {",
-          "  return b64url(CryptoJS.enc.Utf8.parse(JSON.stringify(obj)));",
-          "}",
-          "function sign(header, payload, secret) {",
-          "  const data = b64urlJson(header) + '.' + b64urlJson(payload);",
-          "  const sig = b64url(CryptoJS.HmacSHA256(data, secret));",
-          "  return data + '.' + sig;",
-          "}",
-          "",
-          "const now = Math.floor(Date.now() / 1000);",
-          "const secret = pm.collectionVariables.get('jwtSecret');",
-          "const mode = pm.variables.get('tokenMode') || 'valid';",
-          "",
-          "const header = { alg: 'HS256', typ: 'JWT' };",
-          "const claims = {",
-          "  iss: pm.collectionVariables.get('jwtIssuer'),",
-          "  aud: pm.collectionVariables.get('jwtAudience'),",
-          "  sub: pm.collectionVariables.get('sub'),",
-          "  sid: pm.collectionVariables.get('sid'),",
-          "  iat: now - 10,",
-          "  nbf: now - 10,",
-          "  exp: now + 3600",
-          "};",
-          "",
-          "switch (mode) {",
-          "  case 'expired':     claims.iat = now - 7200; claims.nbf = now - 7200; claims.exp = now - 60; break;",
-          "  case 'badIssuer':   claims.iss = 'otro-emisor'; break;",
-          "  case 'badAudience': claims.aud = 'otra-audiencia'; break;",
-          "  case 'noSub':       delete claims.sub; delete claims.sid; break;",
-          "  case 'noExp':       delete claims.exp; break;",
-          "}",
-          "",
-          "let token;",
-          "if (mode === 'badAlgNone') {",
-          "  // alg:none — debe rechazarse por WithValidMethods([\"HS256\"]).",
-          "  token = b64urlJson({ alg: 'none', typ: 'JWT' }) + '.' + b64urlJson(claims) + '.';",
-          "} else if (mode === 'badSignature') {",
-          "  token = sign(header, claims, 'secreto-incorrecto-pero-de-mas-de-32-bytes!!');",
-          "} else {",
-          "  token = sign(header, claims, secret);",
-          "}",
-          "",
-          "pm.collectionVariables.set('token', token);"
-        ]
-      }
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8084"
+    },
+    {
+      "key": "sid",
+      "value": "sesion-demo"
+    },
+    {
+      "key": "allowedOrigin",
+      "value": "http://localhost:4200"
+    },
+    {
+      "key": "tokenIntercambio",
+      "value": ""
+    },
+    {
+      "key": "dotnetUrl",
+      "value": "http://127.0.0.1:9099/calcular"
+    },
+    {
+      "key": "numero",
+      "value": "7"
+    },
+    {
+      "key": "wsUrl",
+      "value": ""
     }
   ],
   "item": [
     {
-      "name": "00 — Salud",
-      "description": "Comprobacion de vida del proceso. Es el unico endpoint sin autenticacion, asi que sirve para confirmar que el backend esta levantado y accesible ANTES de investigar cualquier 401 de las demas carpetas.\n\nSi esta peticion ya falla, el problema es de red o de arranque (puerto, bind address, agente de Postman), no del contrato de seguridad.",
+      "name": "00 — Salud (¿está vivo el backend?)",
+      "description": "Comprobacion de vida del proceso. Es el unico endpoint sin autenticacion, asi que\nsirve para confirmar que el backend esta levantado y accesible ANTES de investigar\ncualquier fallo de las otras carpetas.\n\nSi esta peticion ya falla, el problema es de red o de arranque —puerto, bind address,\nel backend parado— y no del contrato.",
       "item": [
         {
           "name": "GET /health",
           "request": {
             "method": "GET",
             "header": [],
-            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] },
-            "description": "Handler: handleHealth (main.go).\n\nSin autenticacion y sin validacion de origen: responde siempre 200 mientras el proceso viva.\n\nDevuelve:\n  stack             — siempre \"go\", distingue esta replica de los backends .NET/Java/Python del POC\n  status            — \"ok\"\n  instance          — WS_INSTANCE_ID, o el hostname si no esta fijado. Identifica la replica que atiende\n  activeConnections — WebSockets abiertos ahora mismo (SessionRegistry.Active)\n  maxConnections    — WS_MAX_CONNECTIONS (200), el tope anti-DoS\n\nUso practico: activeConnections te dice si tienes un WebSocket abierto, que es la condicion para que el push de la carpeta 02 devuelva 202 en vez de 404."
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Sin autenticacion y sin validacion de origen: responde 200 mientras el proceso viva.\n\nDevuelve:\n  stack             — siempre \"go\"\n  status            — \"ok\"\n  instance          — WS_INSTANCE_ID, o el hostname. Identifica la replica que atiende\n  activeConnections — WebSockets abiertos ahora mismo\n  maxConnections    — el tope de conexiones (WS_MAX_CONNECTIONS)\n\nUso practico: `activeConnections` te dice si tu WebSocket llego a abrirse de verdad.\nSi abriste el canal y aqui sigue en 0, el handshake se rechazo — mira la peticion de\ndiagnostico de la carpeta 01."
           },
           "event": [
             {
@@ -94,346 +63,59 @@
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
                   "const b = pm.response.json();",
-                  "pm.test('stack = go', () => pm.expect(b.stack).to.eql('go'));",
-                  "pm.test('status = ok', () => pm.expect(b.status).to.eql('ok'));",
+                  "pm.test('el backend responde', () => {",
+                  "  pm.expect(b.stack).to.eql('go');",
+                  "  pm.expect(b.status).to.eql('ok');",
+                  "});",
                   "pm.test('reporta capacidad', () => {",
                   "  pm.expect(b).to.have.property('activeConnections');",
                   "  pm.expect(b).to.have.property('maxConnections');",
-                  "});"
+                  "});",
+                  "",
+                  "console.log('WebSockets abiertos ahora mismo: ' + b.activeConnections +",
+                  "  ' de ' + b.maxConnections);"
                 ]
               }
             }
-          ]
+          ],
+          "response": []
         }
       ]
     },
     {
-      "name": "01 — Diagnostico del handshake (GET /ws sin upgrade)",
-      "description": "Prueba los controles PRE-UPGRADE del WebSocket sin abrir ningun socket.\n\nhandleWS detecta que la peticion no lleva las cabeceras de upgrade y, en vez de rechazarla, devuelve en JSON el veredicto que habria aplicado al handshake: {allowed, reason, code}. Eso permite verificar toda la seguridad del canal con peticiones HTTP normales, que es justo lo que Postman sabe hacer.\n\nOrden de evaluacion (funcion evaluate en main.go) — importa porque determina que error ves cuando fallan dos cosas a la vez:\n  1. Origen   -> ORIGIN_NOT_ALLOWED 4403 / HTTP 403\n  2. Token    -> TOKEN_* 4001-4004 / HTTP 401\n  3. Capacidad-> SERVER_AT_CAPACITY 4013 / HTTP 503\n\nEl campo `code` es el codigo de cierre WebSocket que recibiria el cliente si la peticion fuese un handshake real. El `reason` es la constante compartida por los cuatro backends del POC.",
+      "name": "01 — Frontend (lo que tiene que implementar)",
+      "description": "El ciclo desde el lado del navegador, con lo que hay que probar.\n\nLas dos patas HTTP —el canje del token y el diagnostico del handshake— son\nejecutables aqui. La pata WebSocket va en un WebSocket Request (carpeta 04) o con\n`node tools/peticion.js`.\n\nAbre 'LEEME' y pasaselo al dev de frontend.",
       "item": [
         {
-          "name": "Token valido -> allowed:true",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Origin", "value": "{{allowedOrigin}}" }],
-            "url": {
-              "raw": "{{baseUrl}}/ws?token={{token}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["ws"],
-              "query": [{ "key": "token", "value": "{{token}}" }]
-            },
-            "description": "CAMINO FELIZ del handshake. Origen en la lista blanca + JWT HS256 bien formado.\n\nEl token lo firma el pre-request script de la coleccion con los claims correctos (iss, aud, sub, sid, iat, nbf, exp). Como no se fija `tokenMode`, sale el modo 'valid'.\n\nEsperado: 200 con {\"allowed\":true,\"reason\":null,\"code\":null}.\n\nAdemas comprueba la cabecera CORS: setDiagnosticCORS devuelve el origen CONCRETO de la lista blanca, nunca \"*\". Ese detalle importa porque la UI de Angular vive en :4200, otro origen, y sin la cabecera el navegador le bloquea la respuesta y no puede mostrar el motivo del rechazo.\n\nEl token va en la query string, no en una cabecera, porque el WebSocket del navegador no permite enviar cabeceras en el handshake."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "pm.test('allowed = true', () => pm.expect(pm.response.json().allowed).to.be.true);",
-                  "pm.test('CORS devuelve el origen concreto, nunca *', () => {",
-                  "  pm.expect(pm.response.headers.get('Access-Control-Allow-Origin')).to.eql(pm.collectionVariables.get('allowedOrigin'));",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Sin token -> 401 TOKEN_MISSING",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Origin", "value": "{{allowedOrigin}}" }],
-            "url": { "raw": "{{baseUrl}}/ws", "host": ["{{baseUrl}}"], "path": ["ws"] },
-            "description": "El canal no es anonimo: sin token no se entra, aunque el origen este en la lista blanca.\n\nSe omite por completo el parametro ?token= de la URL. CheckToken hace TrimSpace y trata la cadena vacia igual que la ausencia, asi que ?token= tambien daria este mismo error.\n\nEsperado: 401 TOKEN_MISSING / 4001.\n\nEs el caso base de la carpeta: fija el comportamiento por defecto (denegar) frente al que confirman el resto de peticiones (denegar por un motivo concreto). Un codigo propio para la ausencia, distinto de TOKEN_INVALID, permite al frontend distinguir 'nunca hubo sesion' de 'la sesion es mala', que llevan a mensajes de usuario diferentes."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('401', () => pm.response.to.have.status(401));",
-                  "const b = pm.response.json();",
-                  "pm.test('TOKEN_MISSING / 4001', () => {",
-                  "  pm.expect(b.reason).to.eql('TOKEN_MISSING');",
-                  "  pm.expect(b.code).to.eql(4001);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Token caducado -> 401 TOKEN_EXPIRED",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Origin", "value": "{{allowedOrigin}}" }],
-            "url": {
-              "raw": "{{baseUrl}}/ws?token={{token}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["ws"],
-              "query": [{ "key": "token", "value": "{{token}}" }]
-            },
-            "description": "El canal no admite tokens vencidos: sin esto, un token robado valdria para siempre.\n\ntokenMode='expired' firma un JWT por lo demas perfecto (firma buena, iss y aud correctos) pero con exp = ahora - 60 s. El unico motivo del rechazo es la caducidad, asi que el error distingue este caso del resto.\n\nEsperado: 401 TOKEN_EXPIRED / 4003.\n\nLa validacion corre con jwt.WithLeeway(0): no hay margen de tolerancia de reloj, un token vencido hace un segundo ya no vale."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": { "type": "text/javascript", "exec": ["pm.variables.set('tokenMode', 'expired');"] }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('401', () => pm.response.to.have.status(401));",
-                  "const b = pm.response.json();",
-                  "pm.test('TOKEN_EXPIRED / 4003', () => {",
-                  "  pm.expect(b.reason).to.eql('TOKEN_EXPIRED');",
-                  "  pm.expect(b.code).to.eql(4003);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Firma invalida -> 401 TOKEN_INVALID",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Origin", "value": "{{allowedOrigin}}" }],
-            "url": {
-              "raw": "{{baseUrl}}/ws?token={{token}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["ws"],
-              "query": [{ "key": "token", "value": "{{token}}" }]
-            },
-            "description": "El control central: nadie puede fabricarse un token sin conocer WS_JWT_SECRET.\n\ntokenMode='badSignature' firma los MISMOS claims validos pero con otro secreto. Todo el contenido del token es legitimo; solo la firma no cuadra.\n\nEsperado: 401 TOKEN_INVALID / 4002.\n\nEs el caso que demuestra que el backend verifica la firma de verdad y no se limita a decodificar el payload en base64. Si esto devolviera 200, cualquiera podria entrar declarando el sid que quisiera."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": { "type": "text/javascript", "exec": ["pm.variables.set('tokenMode', 'badSignature');"] }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('401', () => pm.response.to.have.status(401));",
-                  "pm.test('TOKEN_INVALID / 4002', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('TOKEN_INVALID');",
-                  "  pm.expect(b.code).to.eql(4002);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "alg:none -> 401 (confusion de algoritmo)",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Origin", "value": "{{allowedOrigin}}" }],
-            "url": {
-              "raw": "{{baseUrl}}/ws?token={{token}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["ws"],
-              "query": [{ "key": "token", "value": "{{token}}" }]
-            },
-            "description": "Ataque clasico de confusion de algoritmo. El atacante manda un token con cabecera {\"alg\":\"none\"} y firma vacia, esperando que la libreria se crea el algoritmo que le declara el propio token y se salte la verificacion.\n\ntokenMode='badAlgNone' construye exactamente eso: header alg:none, claims validos, tercer segmento vacio.\n\nEsperado: 401 TOKEN_INVALID.\n\nLo cierra jwt.WithValidMethods([\"HS256\"]) en CheckToken: el algoritmo lo fija el servidor, no el token. Sin esa opcion este caso devolveria 200 y la autenticacion entera seria decorativa."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": { "type": "text/javascript", "exec": ["pm.variables.set('tokenMode', 'badAlgNone');"] }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('401 — no se acepta alg:none', () => pm.response.to.have.status(401));",
-                  "pm.test('allowed = false', () => pm.expect(pm.response.json().allowed).to.be.false);"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Issuer incorrecto -> 401 TOKEN_CLAIMS_INVALID",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Origin", "value": "{{allowedOrigin}}" }],
-            "url": {
-              "raw": "{{baseUrl}}/ws?token={{token}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["ws"],
-              "query": [{ "key": "token", "value": "{{token}}" }]
-            },
-            "description": "No basta con que la firma sea buena: el token tiene que venir del emisor esperado.\n\ntokenMode='badIssuer' firma con el secreto CORRECTO pero pone iss='otro-emisor' en vez de WS_JWT_ISSUER (ws-poc-issuer).\n\nEsperado: 401 TOKEN_CLAIMS_INVALID / 4004.\n\nLo impone jwt.WithIssuer(cfg.JWTIssuer). Cubre el escenario de un token legitimo emitido por otro sistema que comparta el mismo secreto: sigue sin valer aqui."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": { "type": "text/javascript", "exec": ["pm.variables.set('tokenMode', 'badIssuer');"] }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('401', () => pm.response.to.have.status(401));",
-                  "pm.test('TOKEN_CLAIMS_INVALID / 4004', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('TOKEN_CLAIMS_INVALID');",
-                  "  pm.expect(b.code).to.eql(4004);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Audience incorrecta -> 401 TOKEN_CLAIMS_INVALID",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Origin", "value": "{{allowedOrigin}}" }],
-            "url": {
-              "raw": "{{baseUrl}}/ws?token={{token}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["ws"],
-              "query": [{ "key": "token", "value": "{{token}}" }]
-            },
-            "description": "La otra mitad del control de claims: el token tiene que ir dirigido a ESTE servicio.\n\ntokenMode='badAudience' firma bien y con el issuer correcto, pero con aud='otra-audiencia' en vez de WS_JWT_AUDIENCE (ws-poc-clients).\n\nEsperado: 401 TOKEN_CLAIMS_INVALID / 4004.\n\nLo impone jwt.WithAudience(cfg.JWTAudience). Evita que un token emitido para otro servicio del mismo ecosistema se pueda reutilizar aqui."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": { "type": "text/javascript", "exec": ["pm.variables.set('tokenMode', 'badAudience');"] }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('401', () => pm.response.to.have.status(401));",
-                  "pm.test('TOKEN_CLAIMS_INVALID', () => pm.expect(pm.response.json().reason).to.eql('TOKEN_CLAIMS_INVALID'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Sin exp -> 401 TOKEN_CLAIMS_INVALID",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Origin", "value": "{{allowedOrigin}}" }],
-            "url": {
-              "raw": "{{baseUrl}}/ws?token={{token}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["ws"],
-              "query": [{ "key": "token", "value": "{{token}}" }]
-            },
-            "description": "Complementa al caso del token caducado: ahi se rechaza un exp vencido, aqui la AUSENCIA de exp.\n\ntokenMode='noExp' firma correctamente todos los claims menos exp, que se omite. Sin este control, omitir el campo seria la forma trivial de saltarse la caducidad y obtener un token eterno.\n\nEsperado: 401 TOKEN_CLAIMS_INVALID / 4004.\n\nLo impone jwt.WithExpirationRequired(): exp no es opcional aunque el estandar JWT lo permita."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": { "type": "text/javascript", "exec": ["pm.variables.set('tokenMode', 'noExp');"] }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('401 — exp es obligatorio', () => pm.response.to.have.status(401));",
-                  "pm.test('TOKEN_CLAIMS_INVALID', () => pm.expect(pm.response.json().reason).to.eql('TOKEN_CLAIMS_INVALID'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Origen no permitido -> 403 ORIGIN_NOT_ALLOWED",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Origin", "value": "http://evil.example.com" }],
-            "url": {
-              "raw": "{{baseUrl}}/ws?token={{token}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["ws"],
-              "query": [{ "key": "token", "value": "{{token}}" }]
-            },
-            "description": "Defensa contra Cross-Site WebSocket Hijacking: una web maliciosa abierta en el navegador de la victima no debe poder abrir el canal, aunque la cookie o el token viajen solos.\n\nSe manda un Origin que NO esta en WS_ALLOWED_ORIGINS junto a un token PERFECTAMENTE VALIDO. Como evaluate() comprueba el origen primero, el token ni se llega a mirar: el error es de origen, no de token. Eso confirma el orden de los controles.\n\nEsperado: 403 ORIGIN_NOT_ALLOWED / 4403.\n\nEl test verifica ademas que NO se devuelve la cabecera Access-Control-Allow-Origin: setDiagnosticCORS solo la emite para origenes de la lista blanca, asi que el atacante no puede leer ni el motivo del rechazo."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('403', () => pm.response.to.have.status(403));",
-                  "const b = pm.response.json();",
-                  "pm.test('ORIGIN_NOT_ALLOWED / 4403', () => {",
-                  "  pm.expect(b.reason).to.eql('ORIGIN_NOT_ALLOWED');",
-                  "  pm.expect(b.code).to.eql(4403);",
-                  "});",
-                  "pm.test('no se filtra CORS a un origen ajeno', () => {",
-                  "  pm.expect(pm.response.headers.get('Access-Control-Allow-Origin')).to.be.oneOf([null, undefined]);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Sin cabecera Origin -> permitido (cliente no navegador)",
+          "name": "LEEME — el ciclo del frontend y que probar",
           "request": {
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/ws?token={{token}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["ws"],
-              "query": [{ "key": "token", "value": "{{token}}" }]
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
             },
-            "description": "Excepcion deliberada, no un descuido: CheckOrigin devuelve verdictOK cuando NO hay cabecera Origin.\n\nEl razonamiento es que solo los navegadores mandan Origin obligatoriamente. Su ausencia significa cliente no-navegador (k6, Node, curl, el propio .NET), donde el ataque CSWSH no aplica porque no hay cookies de sesion que el navegador adjunte solo. Sin esta excepcion, las pruebas de carga del POC no podrian conectarse.\n\nEsperado: 200 allowed:true — el token sigue siendo obligatorio, lo unico que se relaja es el origen.\n\nOJO: el comentario de guards.go marca esto como algo que en produccion se endureceria a rechazo. Es una concesion del POC, no una recomendacion."
+            "description": "PARA EL DEV DE FRONTEND\n\nTU CICLO, DE PRINCIPIO A FIN\n\n  0. Login contra el .NET. Eso no pasa por Go.\n\n  1. Genera la SESION: un NUMERO unico. Es tambien el id de esta conexion.\n     Uno nuevo POR CONEXION: si reconectas, estrena numero.\n\n  2. Canjeala por un token:\n\n       POST /api/session-token          (sin Authorization: es el que lo produce)\n       Origin: <tu origen, tiene que estar en WS_ALLOWED_ORIGINS>\n       {\"SESION\":\"12345678\"}\n\n       200 {\"token\":\"...\",\"SESION\":\"12345678\",\"expira_en\":3600,\"instance\":\"...\"}\n\n     `expira_en` viene en SEGUNDOS, no como fecha: no dependes de que tu reloj\n     coincida con el del servidor. Programa la renovacion con eso.\n\n  3. Abre el canal:   ws://<host>/ws?token=<el token>\n\n     El token va en la query porque el WebSocket del navegador NO permite mandar\n     cabeceras en el handshake.\n\n  4. Pregunta:\n\n       {\"type\":\"peticion\",\"id\":\"q1\",\"ts\":1700000000000,\"payload\":{\"numero\":7}}\n\n  5. Recibe, por el mismo socket y con el MISMO id:\n\n       {\"type\":\"respuesta\",\"id\":\"q1\",\"Sesion\":\"12345678\",\n        \"Payload\":{\"numero\":7,\"estado\":\"APROBADO\"}}\n\n     Casa la respuesta por `id`. Es lo unico que te sirve si tienes varias\n     peticiones en vuelo — el orden de llegada no esta garantizado.\n\nLAS CINCO COSAS QUE TE VAN A MORDER\n\n  1. ENVIAS `payload` EN MINUSCULA Y RECIBES `Payload` EN MAYUSCULA.\n     Lo mismo con `Sesion`. No es un descuido: se manda en el lenguaje del canal y\n     se recibe con la grafia del dato, que es la del .NET. Es el error numero uno.\n\n  2. ESQUEMA CERRADO AL ENVIAR: solo `type`, `id`, `ts`, `payload`. Ni un campo mas,\n     o es INVALID_PAYLOAD y te CIERRA el socket. `ts` no puede ser 0. El `id` solo\n     admite [A-Za-z0-9_-] y hasta 64 caracteres.\n     Y nunca reenvies al servidor un frame que el te mando: lleva campos de salida.\n\n  3. UN FRAME `error` PUEDE SIGNIFICAR DOS COSAS OPUESTAS:\n\n       BACKEND_UNAVAILABLE / BACKEND_TIMEOUT / BACKEND_ERROR / BACKEND_BUSY\n         -> fallo del .NET. Llega con el `id` de TU peticion y el socket SIGUE\n            ABIERTO. Falla esa peticion, no la sesion. Reintenta sin reconectar.\n\n       cualquier otro (INVALID_PAYLOAD, RATE_LIMIT_EXCEEDED, MESSAGE_TOO_LARGE,\n       IDLE_TIMEOUT, BACKPRESSURE)\n         -> rompiste el contrato del canal. Llega con id \"-\" y DETRAS VIENE EL\n            CIERRE. Hay que reconectar.\n\n     Distinguelos por `reason`, no por el hecho de que llegue un `error`.\n\n  4. SI EL HANDSHAKE FALLA, EL NAVEGADOR SOLO TE DA 1006, SIN MOTIVO.\n     Es una limitacion de la API WebSocket del navegador, no del servidor. Para saber\n     por que, repite la MISMA URL como un GET normal (ws:// -> http://): el servidor\n     responde el veredicto en JSON.\n\n       GET http://<host>/ws?token=<token>\n       -> {\"allowed\":false,\"reason\":\"TOKEN_EXPIRED\",\"code\":4003}\n\n     Los motivos que veras ahi: TOKEN_MISSING (4001), TOKEN_INVALID (4002),\n     TOKEN_EXPIRED (4003), TOKEN_CLAIMS_INVALID (4004), ORIGIN_NOT_ALLOWED (4403),\n     SERVER_AT_CAPACITY (4013).\n\n     TU NUNCA FIRMAS UN TOKEN. El tuyo sale siempre del canje del paso 2. Firmarlos\n     requiere un secreto que solo conocen el servidor Go y el backend .NET.\n\n  5. EL CANJE DA 409 SESSION_IN_USE SI ESA SESION YA ESTA CONECTADA.\n     Es a proposito: como la SESION es un numero, sin esto cualquiera podria pedir\n     el token de una sesion ajena probando numeros. Por eso el numero es nuevo por\n     conexion. Si reconectas y te sale 409, es que el socket viejo aun no ha muerto:\n     cierralo bien antes, o estrena numero.\n\nLATIDO Y RECONEXION\n\n  El SERVIDOR manda pings cada 30 s y el navegador responde pong solo — no tienes que\n  hacer nada. Si pasas 60 s sin dar señales, te cierra con IDLE_TIMEOUT (4014).\n  Puedes mandar {\"type\":\"ping\",...} y te contesta {\"type\":\"pong\",...} con tu `id`:\n  sirve para medir latencia y para comprobar que el canal sigue vivo tras un error.\n\n  Al reconectar: SESION nueva -> canje nuevo -> socket nuevo. El token dura una hora,\n  pero la SESION vieja no la reutilices.\n\nLIMITES QUE TIENES QUE RESPETAR\n\n  20 mensajes por segundo y conexion   -> RATE_LIMIT_EXCEEDED (4008) y cierre\n  64 KB por frame                      -> MESSAGE_TOO_LARGE (4009) y cierre\n  8192 caracteres de payload serializado\n  Nada de <script, javascript:, onerror=, onload=, <iframe, data:text/html\n\nQUE PROBAR (la lista corta)\n\n  [ ] Camino feliz: canje -> conexion -> peticion -> respuesta casada por id\n  [ ] Dos peticiones a la vez: que cada respuesta va a su promesa, por id\n  [ ] BACKEND_TIMEOUT: que muestras el error y el socket SIGUE vivo (manda un ping)\n  [ ] BACKEND_UNAVAILABLE: idem, con el backend sin configurar\n  [ ] Token caducado al abrir: que caes al GET de diagnostico y muestras el motivo\n  [ ] 409 al canjear: que estrenas numero en vez de reintentar con el mismo\n  [ ] Reconexion tras caida de red: numero nuevo, canje nuevo, socket nuevo\n  [ ] Renovacion del token antes de `expira_en`\n  [ ] Un INVALID_PAYLOAD a proposito: que detectas el cierre y reconectas\n\nLas peticiones HTTP de esta carpeta (canje y diagnostico) son ejecutables aqui. La\nparte del socket se prueba con New > WebSocket Request, o con `node tools/peticion.js`."
           },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "pm.test('allowed = true', () => pm.expect(pm.response.json().allowed).to.be.true);"
-                ]
-              }
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "name": "01b — Intercambio SESION -> token (POST /api/session-token)",
-      "description": "POST /api/session-token canjea la SESION que el frontend recibe al hacer login por un token del canal.\n\nPOR QUE EXISTE: el login lo hace el frontend contra otro backend, que no firma tokens de este servicio. El handshake de /ws solo sabe leer la sesion de un token firmado, asi que este endpoint es el puente.\n\nCadena de controles en handleSessionToken (token.go), en este orden:\n  1. CORS/preflight   -> 204 si es OPTIONS\n  2. Metodo           -> 405 METHOD_NOT_ALLOWED si no es POST\n  3. Origin           -> 403 ORIGIN_NOT_ALLOWED (obligatorio, a diferencia de /ws)\n  4. Rate limit       -> 429 RATE_LIMIT_EXCEEDED (WS_SESSION_TOKEN_RATE_LIMIT_PER_SEC = 20/s)\n  5. Tamano del cuerpo-> 413 MESSAGE_TOO_LARGE\n  6. Validacion       -> 400 INVALID_SESSION / INVALID_PAYLOAD\n  7. Firma            -> 200 {token, sesion, expira_en, instance}\n\nEs el UNICO endpoint sin Authorization, porque es el que la produce: quien presente una SESION valida obtiene sus mensajes. Por eso el Origin es obligatorio aqui y opcional en el canal.\n\nEl token que devuelve se guarda en la variable {{tokenIntercambio}}, no en {{token}}: el pre-request script de la coleccion reescribe {{token}} en cada peticion, asi que el canjeado se perderia.",
-      "item": [
+          "response": []
+        },
         {
-          "name": "POST /api/session-token — camino feliz",
+          "name": "1. Canjear la SESION por un token",
           "request": {
             "method": "POST",
             "header": [
               {
-                "key": "Origin",
-                "value": "{{allowedOrigin}}"
-              },
-              {
                 "key": "Content-Type",
                 "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{allowedOrigin}}"
               }
             ],
             "url": {
@@ -446,11 +128,16 @@
                 "session-token"
               ]
             },
-            "description": "El caso de uso real: el frontend acaba de hacer login y canjea su SESION por un token del canal.\n\nSe usa {{sid}} como SESION para que el token canjeado enrute a la misma sesion que el resto de la coleccion.\n\nPRUEBA DE EXTREMO A EXTREMO:\n  1. Lanza esta peticion\n  2. Abre una WebSocket Request a ws://127.0.0.1:8084/ws?token={{tokenIntercambio}} (ver carpeta 04)\n  3. Lanza 'POST /api/push - camino feliz': debe responder 202 delivered:1\n\nEl token sale firmado con la sesion en sid, SESION y sub, los tres claims que CheckToken sabe leer.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"SESION\": \"{{sid}}\"\n}"
-            }
+              "raw": "{\n  \"SESION\": \"{{$timestamp}}{{$randomInt}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "El paso 2 del ciclo. Sin `Authorization`: es el endpoint que produce la credencial.\n\nLa `SESION` es un numero que genera el frontend, NUEVO POR CONEXION. Aqui se usa\n`{{$timestamp}}{{$randomInt}}`, variables dinamicas de Postman: dan un numero distinto en\ncada envio. El $randomInt esta porque el $timestamp solo cambia cada segundo, y dos\nenvios seguidos repetirian sesion — asi no chocas con el 409 de la tercera peticion.\n\nEl `Origin` tiene que estar en `WS_ALLOWED_ORIGINS` del servidor, o responde 403.\n\nCopia el `token` de la respuesta: es lo que va en la URL del WebSocket.\n\nLa respuesta deja la URL completa del WebSocket en la variable `wsUrl` y en la consola\nde Postman. Copiala y pegala en New > WebSocket Request: eso es todo lo que necesitas\npara abrir el canal."
           },
           "event": [
             {
@@ -460,915 +147,53 @@
                 "exec": [
                   "pm.test('200 OK', () => pm.response.to.have.status(200));",
                   "const b = pm.response.json();",
-                  "pm.test('devuelve token, sesion, vigencia e instancia', () => {",
-                  "  pm.expect(b.token).to.be.a('string').and.to.not.be.empty;",
-                  "  pm.expect(b.SESION).to.eql(pm.collectionVariables.get('sid'));",
-                  "  pm.expect(b.expira_en).to.be.above(0);",
-                  "  pm.expect(b).to.have.property('instance');",
+                  "",
+                  "pm.test('trae lo que el frontend necesita', () => {",
+                  "  pm.expect(b.token, 'el token con el que se abre el canal')",
+                  "    .to.be.a('string').and.to.not.be.empty;",
+                  "  pm.expect(b.SESION, 'devuelve la SESION que se pidio')",
+                  "    .to.be.a('string').and.to.not.be.empty;",
+                  "  pm.expect(b.expira_en, 'vigencia en segundos, para programar la renovacion')",
+                  "    .to.be.above(0);",
                   "});",
                   "",
-                  "// El token canjeado va a su propia variable: el pre-request de la coleccion",
-                  "// reescribe {{token}} en cada peticion y se perderia.",
+                  "// La URL entera, lista para pegar en New > WebSocket Request. Queda tambien en",
+                  "// Variables > wsUrl > Current value, para copiarla de ahi.",
+                  "const url = pm.collectionVariables.get('baseUrl').replace(/^http/, 'ws') +",
+                  "  '/ws?token=' + b.token;",
+                  "pm.collectionVariables.set('wsUrl', url);",
                   "pm.collectionVariables.set('tokenIntercambio', b.token);",
                   "",
-                  "const claims = JSON.parse(atob(b.token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));",
-                  "pm.test('la sesion viaja en sid, SESION y sub', () => {",
-                  "  const sid = pm.collectionVariables.get('sid');",
-                  "  pm.expect(claims.sid).to.eql(sid);",
-                  "  pm.expect(claims.SESION).to.eql(sid);",
-                  "  pm.expect(claims.sub).to.eql(sid);",
-                  "});",
-                  "pm.test('emisor y audiencia son los que verifica el servidor', () => {",
-                  "  pm.expect(claims.iss).to.eql(pm.collectionVariables.get('jwtIssuer'));",
-                  "  pm.expect(claims.aud).to.include(pm.collectionVariables.get('jwtAudience'));",
-                  "});",
-                  "pm.test('la vigencia del claim coincide con expira_en', () => {",
-                  "  pm.expect(claims.exp - claims.iat).to.eql(b.expira_en);",
-                  "});"
+                  "console.log('SESION ' + b.SESION + ', valida ' + b.expira_en + ' s');",
+                  "console.log('Pega esto en New > WebSocket Request:');",
+                  "console.log(url);"
                 ]
               }
             }
-          ]
+          ],
+          "response": []
         },
         {
-          "name": "Token del intercambio en /api/push -> 401 (no abre el puente)",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{tokenIntercambio}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"mensaje inyectado\"\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/push",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "push"
-              ]
-            },
-            "description": "LA FRONTERA ENTRE LAS DOS PUERTAS. Esta peticion debe FALLAR con 401.\n\nEl token de {{tokenIntercambio}} lo emite la maquina expendedora: se lo damos a cualquiera que traiga una SESION. Sirve para abrir /ws y nada mas.\n\n/api/push es otra cosa: ahi se elige A QUE SESION se entrega. Si aceptara este token, cualquiera podria canjear una SESION propia y con ese token inyectar mensajes en la pantalla de otro usuario. Es exactamente lo que pasaba antes de separar los dos controles.\n\nCOMO SE DISTINGUEN: el intercambio marca sus tokens con el claim `canal: true` (lo pone Issuer, en un unico sitio). CheckBridgeToken rechaza los que la lleven. Los tokens de los backends que empujan no la llevan, asi que siguen valiendo sin cambiar nada: para producir un token SIN la marca hay que conocer WS_JWT_SECRET, que es lo que se le exigia al puente desde el principio.\n\nREQUISITO: lanza antes 'POST /api/session-token - camino feliz', que es quien rellena {{tokenIntercambio}}. La carpeta entera en orden ya lo hace.\n\nComparalo con '02 / POST /api/push - camino feliz', que usa {{token}} (firmado con el secreto en el pre-request de la coleccion, sin la marca) y si es aceptado."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('hay un token canjeado que probar', () => {",
-                  "  pm.expect(pm.collectionVariables.get('tokenIntercambio')).to.be.a('string').and.to.not.be.empty;",
-                  "});",
-                  "pm.test('401: el token del canal no abre el puente', () => pm.response.to.have.status(401));",
-                  "pm.test('TOKEN_CLAIMS_INVALID', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('TOKEN_CLAIMS_INVALID');",
-                  "  pm.expect(b.code).to.eql(4004);",
-                  "});",
-                  "pm.test('no se entrego nada', () => pm.expect(pm.response.text()).to.not.include('delivered'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "OPTIONS /api/session-token (preflight CORS)",
-          "request": {
-            "method": "OPTIONS",
-            "header": [
-              {
-                "key": "Origin",
-                "value": "{{allowedOrigin}}"
-              },
-              {
-                "key": "Access-Control-Request-Method",
-                "value": "POST"
-              },
-              {
-                "key": "Access-Control-Request-Headers",
-                "value": "Content-Type"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/session-token",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "session-token"
-              ]
-            },
-            "description": "El navegador manda este preflight antes del POST porque la peticion lleva Content-Type: application/json.\n\nSin respuesta al preflight, el fetch del frontend falla antes de salir y la UI solo ve un error de red."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('204 sin contenido', () => pm.response.to.have.status(204));",
-                  "pm.test('devuelve el origen concreto, nunca *', () => {",
-                  "  pm.expect(pm.response.headers.get('Access-Control-Allow-Origin'))",
-                  "    .to.eql(pm.collectionVariables.get('allowedOrigin'));",
-                  "});",
-                  "pm.test('permite POST y Content-Type', () => {",
-                  "  pm.expect(pm.response.headers.get('Access-Control-Allow-Methods')).to.include('POST');",
-                  "  pm.expect(pm.response.headers.get('Access-Control-Allow-Headers')).to.include('Content-Type');",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Sin cabecera Origin -> 403 ORIGIN_NOT_ALLOWED",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/session-token",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "session-token"
-              ]
-            },
-            "description": "Aqui el contrato se ENDURECE respecto al canal.\n\nEn /ws, una peticion sin Origin se acepta: no es un navegador, y asi funcionan las pruebas de carga desde Node/k6. Ese mismo hueco en este endpoint permitiria acunar tokens desde cualquier cliente que no sea un navegador, asi que aqui la ausencia de Origin se rechaza.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"SESION\": \"{{sid}}\"\n}"
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('403', () => pm.response.to.have.status(403));",
-                  "pm.test('ORIGIN_NOT_ALLOWED', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('ORIGIN_NOT_ALLOWED');",
-                  "  pm.expect(b.code).to.eql(4403);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Origen no permitido -> 403 ORIGIN_NOT_ALLOWED",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Origin",
-                "value": "http://sitio-no-permitido.test"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/session-token",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "session-token"
-              ]
-            },
-            "description": "Un origen fuera de WS_ALLOWED_ORIGINS no puede canjear tokens. Es el control que impide que otra web abierta en el mismo navegador pida un token para la sesion del usuario.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"SESION\": \"{{sid}}\"\n}"
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('403', () => pm.response.to.have.status(403));",
-                  "pm.test('ORIGIN_NOT_ALLOWED', () => pm.expect(pm.response.json().reason).to.eql('ORIGIN_NOT_ALLOWED'));",
-                  "pm.test('no emite token', () => pm.expect(pm.response.text()).to.not.include('token'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "SESION vacia -> 400 INVALID_SESSION",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Origin",
-                "value": "{{allowedOrigin}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/session-token",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "session-token"
-              ]
-            },
-            "description": "Misma regla que el `sesion` del sobre del push: nunca se emite un token para un identificador que el handshake rechazaria despues.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"SESION\": \"\"\n}"
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_SESSION', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('INVALID_SESSION');",
-                  "  pm.expect(b.code).to.eql(4010);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "SESION con caracteres no seguros -> 400 INVALID_SESSION",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Origin",
-                "value": "{{allowedOrigin}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/session-token",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "session-token"
-              ]
-            },
-            "description": "El identificador viaja en URLs (?token=), en claves de Redis y en logs, asi que el alfabeto esta restringido a [A-Za-z0-9_-] con un maximo de 64 caracteres.\n\nUna SESION real del login (28 digitos) entra sin problema.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"SESION\": \"3261;drop--\"\n}"
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_SESSION', () => pm.expect(pm.response.json().reason).to.eql('INVALID_SESSION'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Campo desconocido -> 400 INVALID_PAYLOAD",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Origin",
-                "value": "{{allowedOrigin}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/session-token",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "session-token"
-              ]
-            },
-            "description": "Esquema cerrado (DisallowUnknownFields): un campo de mas hace fallar la decodificacion entera.\n\nImporta aqui mas que en ningun sitio: aceptar campos extra en la peticion que emite credenciales seria aceptar en silencio lo que el servidor no piensa mirar.",
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"SESION\": \"{{sid}}\",\n  \"rol\": \"admin\"\n}"
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_PAYLOAD', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('INVALID_PAYLOAD');",
-                  "  pm.expect(b.code).to.eql(4010);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "GET /api/session-token -> 405 METHOD_NOT_ALLOWED",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Origin",
-                "value": "{{allowedOrigin}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/api/session-token",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "session-token"
-              ]
-            },
-            "description": "net/http enruta por RUTA, no por metodo: sin la comprobacion explicita, el mismo handler atenderia GET, PUT o DELETE."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('405', () => pm.response.to.have.status(405));",
-                  "pm.test('METHOD_NOT_ALLOWED', () => pm.expect(pm.response.json().reason).to.eql('METHOD_NOT_ALLOWED'));"
-                ]
-              }
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "name": "02 — Push (.NET -> cliente)",
-      "description": "POST /api/push es el reemplazo del canal push del .NET Framework 4.5: el backend .NET 4.8 entrega aqui un sobre {sesion, payload} y el Go lo reparte por WebSocket a esa sesion.\n\nAutenticacion: el mismo JWT que el handshake, pero en la cabecera Authorization (el .NET no es un navegador, si puede mandar cabeceras). bearerToken() acepta el token con o sin el prefijo 'Bearer '.\n\nCadena de controles en handlePush (rest.go), en este orden:\n  1. CORS/preflight   -> 204 si es OPTIONS\n  2. Metodo           -> 405 METHOD_NOT_ALLOWED si no es POST\n  3. Token            -> 401 TOKEN_*\n  4. Rate limit global-> 429 RATE_LIMIT_EXCEEDED (WS_PUSH_RATE_LIMIT_PER_SEC = 100/s)\n  5. Tamano del cuerpo-> 413 MESSAGE_TOO_LARGE (WS_MAX_MESSAGE_BYTES = 65536)\n  6. ValidateEnvelope -> 400 INVALID_SESSION / INVALID_PAYLOAD\n  7. Entrega          -> 202 delivered:N, o 404 SESSION_NOT_FOUND\n\nNOTA sobre el 404: sin un WebSocket abierto con ese mismo sid, el push no tiene destinatario y devuelve 404. Es el comportamiento correcto, no un fallo de la peticion. Para ver el 202 hay que abrir antes el WS (ver carpeta 04).\n\nLa sanitizacion de esta ruta es identica a la del canal WebSocket a proposito: el push acaba en el DOM del navegador igual que un eco, asi que no puede ser un camino mas laxo.",
-      "item": [
-        {
-          "name": "OPTIONS /api/push (preflight CORS)",
-          "request": {
-            "method": "OPTIONS",
-            "header": [
-              { "key": "Origin", "value": "{{allowedOrigin}}" },
-              { "key": "Access-Control-Request-Method", "value": "POST" },
-              { "key": "Access-Control-Request-Headers", "value": "authorization,content-type" }
-            ],
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "El preflight que el navegador manda ANTES del POST real, porque la peticion lleva cabecera Authorization y eso la convierte en una peticion no simple.\n\nPor que existe este caso: con solo Access-Control-Allow-Origin no basta. Si el servidor no contesta al OPTIONS declarando metodos y cabeceras permitidos, el navegador bloquea la llamada real. La UI lo veia como SERVIDOR_INALCANZABLE, un sintoma que despista porque el servidor estaba perfectamente vivo.\n\nEsperado: 204 No Content, con\n  Access-Control-Allow-Methods: GET, POST, OPTIONS\n  Access-Control-Allow-Headers: Authorization, Content-Type\n  Access-Control-Allow-Origin:  el origen concreto de la lista blanca, nunca *\n\nsetAPICORS resuelve el preflight y devuelve true, cortando antes de tocar el token: por eso este OPTIONS no necesita Authorization."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('204 No Content', () => pm.response.to.have.status(204));",
-                  "pm.test('permite Authorization y POST', () => {",
-                  "  pm.expect(pm.response.headers.get('Access-Control-Allow-Headers')).to.include('Authorization');",
-                  "  pm.expect(pm.response.headers.get('Access-Control-Allow-Methods')).to.include('POST');",
-                  "});",
-                  "pm.test('origen concreto, nunca *', () => {",
-                  "  pm.expect(pm.response.headers.get('Access-Control-Allow-Origin')).to.eql(pm.collectionVariables.get('allowedOrigin'));",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — camino feliz",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"hola desde el .NET 4.8\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "El caso de uso real: el .NET 4.8 empuja un mensaje a un usuario concreto.\n\nDOS RESULTADOS VALIDOS segun el estado del sistema:\n  202 delivered:N — hay N WebSockets abiertos con sesion={{sid}}. Devuelve tambien `sesion` e `instance` (la replica que atendio)\n  404 SESSION_NOT_FOUND — no hay nadie conectado con ese sid. Correcto, no es un fallo\n\nEl test acepta ambos a proposito, para que la coleccion pase entera tanto con el WS abierto como sin el.\n\nPRUEBA DE EXTREMO A EXTREMO (lo que de verdad valida el puente):\n  1. Abre una WebSocket Request a ws://127.0.0.1:8084/ws?token={{token}} (ver carpeta 04)\n  2. Lanza esta peticion\n  3. Debe responder 202 delivered:1 Y el frame {\"type\":\"push\",\"payload\":\"hola desde el .NET 4.8\"} debe aparecer en la ventana del WebSocket\n\nEl enrutado usa el `sesion` del cuerpo, pero la sesion del cliente conectado salio de su token (claim sid, o sub si no hay sid): un cliente nunca declara su propia sesion, asi que nadie puede hacerse pasar por otro."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('202 si hay cliente conectado, 404 si no', () => {",
-                  "  pm.expect(pm.response.code).to.be.oneOf([202, 404]);",
-                  "});",
-                  "const b = pm.response.json();",
-                  "if (pm.response.code === 202) {",
-                  "  pm.test('entregado a alguna conexion', () => pm.expect(b.delivered).to.be.above(0));",
-                  "  pm.test('devuelve sesion e instancia', () => {",
-                  "    pm.expect(b.Sesion).to.eql(pm.collectionVariables.get('sid'));",
-                  "    pm.expect(b).to.have.property('instance');",
-                  "  });",
-                  "} else {",
-                  "  pm.test('SESSION_NOT_FOUND', () => pm.expect(b.reason).to.eql('SESSION_NOT_FOUND'));",
-                  "}"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — sin Authorization -> 401",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"sin token\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "El push esta autenticado igual que el handshake: no es un endpoint interno abierto.\n\nCuerpo perfectamente valido, pero sin cabecera Authorization.\n\nEsperado: 401 TOKEN_MISSING / 4001.\n\nImporta porque este endpoint permite entregar mensajes a la sesion de CUALQUIER usuario indicando su sid. Sin autenticacion, cualquiera con acceso a la red podria inyectar contenido en la pantalla de otro. Es la razon de que la sanitizacion del sobre sea tan estricta como la del canal WebSocket.\n\nEl resto de modos de fallo del token (caducado, firma mala, claims incorrectos) ya estan cubiertos en la carpeta 01: la funcion CheckToken es la misma, solo cambia de donde se lee el token (cabecera aqui, query string alli)."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('401', () => pm.response.to.have.status(401));",
-                  "pm.test('TOKEN_MISSING / 4001', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('TOKEN_MISSING');",
-                  "  pm.expect(b.code).to.eql(4001);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — token sin prefijo Bearer",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "{{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"token pelado\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "Tolerancia deliberada de bearerToken(): el prefijo 'Bearer ' es OPCIONAL, tambien se acepta el token pelado.\n\nSe manda Authorization: <jwt> sin prefijo. Esto NO debe dar 401.\n\nEsperado: 202 o 404 (segun haya cliente conectado), nunca 401.\n\nEste caso documenta el contrato de integracion con el .NET 4.8: si el equipo que llama monta la cabecera sin el prefijo, sigue funcionando. La comprobacion del prefijo es case-insensitive y hace TrimSpace del resto, asi que 'bearer <jwt>' tambien vale.\n\nEl test afirma explicitamente 'no es 401' porque ese seria el sintoma si alguien endureciera bearerToken() sin darse cuenta de que rompe al llamante."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('el token pasa la autenticacion', () => pm.expect(pm.response.code).to.not.eql(401));",
-                  "pm.test('202 o 404 segun haya cliente', () => pm.expect(pm.response.code).to.be.oneOf([202, 404]));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "PUT /api/push -> 405 METHOD_NOT_ALLOWED",
-          "request": {
-            "method": "PUT",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"metodo incorrecto\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "El endpoint solo acepta POST (y OPTIONS para el preflight).\n\nSe manda un PUT con token y cuerpo validos.\n\nEsperado: 405 METHOD_NOT_ALLOWED.\n\nEs necesario porque net/http registra el handler por RUTA, no por metodo: sin la comprobacion explicita de r.Method, handlePush atenderia PUT, DELETE, HEAD y cualquier otro verbo. La comprobacion va ANTES que la del token, asi que un metodo incorrecto da 405 aunque el token fuese malo.\n\nGET tambien daria 405 aqui — el push es la ruta de escritura; la de lectura es GET /api/outbox (carpeta 03)."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('405', () => pm.response.to.have.status(405));",
-                  "pm.test('METHOD_NOT_ALLOWED', () => pm.expect(pm.response.json().reason).to.eql('METHOD_NOT_ALLOWED'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — campo desconocido -> 400 INVALID_PAYLOAD",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"hola\",\n  \"extra\": \"campo fuera del contrato\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "Esquema ESTRICTO: el sobre admite exactamente dos campos, `sesion` y `payload`. Cualquier otro hace fallar la decodificacion entera.\n\nSe manda un sobre valido mas un campo `extra`.\n\nEsperado: 400 INVALID_PAYLOAD / 4010.\n\nLo impone decoder.DisallowUnknownFields() en ValidateEnvelope. El comportamiento por defecto de encoding/json es el contrario: ignorar en silencio lo que no conoce. Rechazar en vez de ignorar convierte una desalineacion de contrato entre el .NET y el Go en un error inmediato y visible, en lugar de datos que se pierden sin que nadie se entere.\n\nEl canal WebSocket aplica la misma regla al mensaje del cliente (ValidateMessage), donde ademas cierra la conexion con 4010."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_PAYLOAD / 4010', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('INVALID_PAYLOAD');",
-                  "  pm.expect(b.code).to.eql(4010);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — sesion vacia -> 400 INVALID_SESSION",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"\",\n  \"payload\": \"sin sesion\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "El destinatario es obligatorio: un push sin sesion no se puede enrutar.\n\nSe manda sesion=\"\" con un payload valido.\n\nEsperado: 400 INVALID_SESSION, distinto de INVALID_PAYLOAD para que el llamante sepa cual de los dos campos esta mal.\n\nSe rechaza en la validacion, no mas adelante en la entrega. Si se dejara pasar, la cadena vacia llegaria al registro de sesiones como una clave mas y el fallo saldria como un 404 confuso en vez de como el error de contrato que es.\n\nEl limite superior tambien se comprueba: mas de 64 caracteres da igualmente INVALID_SESSION."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_SESSION', () => pm.expect(pm.response.json().reason).to.eql('INVALID_SESSION'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — sesion con caracteres no seguros -> 400 INVALID_SESSION",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"sesion/../otra\",\n  \"payload\": \"id no seguro\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "El identificador de sesion viaja en URLs, en claves de Redis y en logs, asi que su alfabeto esta restringido.\n\nisSafeID solo admite [A-Za-z0-9_-]. Se manda 'sesion/../otra', que mete barras y puntos al estilo de un path traversal.\n\nEsperado: 400 INVALID_SESSION.\n\nQue cierra: barras y '..' que podrian confundir a un enrutado por path; caracteres de control o saltos de linea que permitirian falsificar entradas en el log (log injection), ya que el sid se escribe tal cual en las lineas [PUSH] y [REJECT]; y caracteres que romperian el formato de las claves de Redis cuando WS_REDIS_ADDR esta configurado.\n\nEl mismo isSafeID valida el claim sid del token en CheckToken y el campo id de los mensajes del cliente."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_SESSION', () => pm.expect(pm.response.json().reason).to.eql('INVALID_SESSION'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — payload con <script> -> 400 INVALID_PAYLOAD",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"<script>alert(1)</script>\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "Sanitizacion anti-XSS en la ruta de entrada del push.\n\nValidateEnvelope pasa el payload a minusculas y busca patrones peligrosos: <script, javascript:, onerror=, onload=, <iframe, data:text/html. Cualquier coincidencia rechaza el sobre.\n\nEsperado: 400 INVALID_PAYLOAD.\n\nPor que aqui y no solo en el cliente: el payload del push acaba en el DOM del navegador exactamente igual que un eco del canal WebSocket. Si esta ruta fuese mas laxa, seria el camino facil para inyectar en la pantalla de un usuario a traves del backend .NET.\n\nEs defensa en profundidad, no la unica capa: el frontend debe seguir escapando al pintar. Un filtro de patrones no sustituye al escapado, pero corta lo evidente antes de que se propague."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_PAYLOAD', () => pm.expect(pm.response.json().reason).to.eql('INVALID_PAYLOAD'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — payload con javascript: -> 400 INVALID_PAYLOAD",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"haz clic: javascript:alert(1)\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "Segundo patron de la lista, con un matiz importante respecto al caso de <script>: aqui el patron va EN MEDIO de texto normal, no como payload completo.\n\nEl vector es distinto: 'javascript:' no necesita etiquetas, basta con que el frontend lo acabe usando como href de un enlace para que un clic ejecute codigo. Cubre lo que un filtro centrado solo en etiquetas HTML dejaria pasar.\n\nEsperado: 400 INVALID_PAYLOAD.\n\nDemuestra que la busqueda es por strings.Contains sobre el texto en minusculas, no una comparacion del payload entero, y que por tanto tambien atrapa 'JavaScript:' o 'JAVASCRIPT:'.\n\nEfecto secundario asumido: un mensaje legitimo que hable de javascript: sera rechazado. El POC prefiere ese falso positivo."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_PAYLOAD', () => pm.expect(pm.response.json().reason).to.eql('INVALID_PAYLOAD'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — payload > 8192 chars -> 400 INVALID_PAYLOAD",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"{{bigPayload}}\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "Hay DOS limites de tamano distintos y este caso aisla el interior; el siguiente (cuerpo > 64 KB) prueba el exterior.\n\n  Cuerpo HTTP completo -> 65536 bytes (WS_MAX_MESSAGE_BYTES), corta readLimited -> 413\n  Campo payload        -> 8192 caracteres (fijo en ValidateEnvelope)     -> 400\n\nEl pre-request script genera 8193 caracteres: uno por encima del limite del payload, pero muy por debajo del limite del cuerpo. Asi el 413 no puede enmascarar el resultado.\n\nEsperado: 400 INVALID_PAYLOAD.\n\nAl ser un tope mas bajo y aplicarse despues de parsear, acota lo que se reenvia al navegador con independencia de lo que quepa en el cuerpo HTTP. Es el mismo limite de 8192 que aplica ValidateMessage a los mensajes del cliente."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": { "type": "text/javascript", "exec": ["pm.variables.set('bigPayload', 'a'.repeat(8193));"] }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_PAYLOAD', () => pm.expect(pm.response.json().reason).to.eql('INVALID_PAYLOAD'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — cuerpo > 64 KB -> 413 MESSAGE_TOO_LARGE",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"{{hugePayload}}\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "El limite exterior, complementario al caso anterior: proteccion de memoria contra un cuerpo enorme.\n\nEl pre-request genera 70000 caracteres, muy por encima de WS_MAX_MESSAGE_BYTES (65536).\n\nEsperado: 413 MESSAGE_TOO_LARGE / 4009.\n\nLo importante es COMO se rechaza. readLimited envuelve el cuerpo en http.MaxBytesReader con max+1 y corta ahi: lee un byte por encima del maximo y, si llega, descarta sin haber materializado el cuerpo entero en memoria. La diferencia entre eso y leer todo para luego medirlo es que la segunda opcion permite tumbar el proceso mandando cuerpos gigantes — el limite dejaria de proteger justo cuando hace falta.\n\nEs la misma tecnica de corte en streaming que usa el canal WebSocket con io.LimitReader para los frames grandes."
-          },
-          "event": [
-            {
-              "listen": "prerequest",
-              "script": { "type": "text/javascript", "exec": ["pm.variables.set('hugePayload', 'a'.repeat(70000));"] }
-            },
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('413', () => pm.response.to.have.status(413));",
-                  "pm.test('MESSAGE_TOO_LARGE / 4009', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('MESSAGE_TOO_LARGE');",
-                  "  pm.expect(b.code).to.eql(4009);",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — JSON malformado -> 400 INVALID_PAYLOAD",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{ \"sesion\": \"{{sid}}\", \"payload\": " },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "Robustez basica del parser: JSON truncado a media clave, sin valor ni llave de cierre.\n\nEsperado: 400 INVALID_PAYLOAD, con respuesta JSON bien formada.\n\nLo que de verdad se comprueba es que el error se traduce al contrato del POC en vez de propagarse: nada de un 500, ni de un panico, ni de devolver el mensaje crudo de encoding/json — que ademas filtraria detalles internos al llamante.\n\nSimula un cuerpo cortado por una conexion caida o por un serializador roto en el lado .NET, que es un fallo de integracion realista."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_PAYLOAD', () => pm.expect(pm.response.json().reason).to.eql('INVALID_PAYLOAD'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — dos JSON pegados -> 400 INVALID_PAYLOAD",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\"sesion\":\"{{sid}}\",\"payload\":\"uno\"}{\"sesion\":\"{{sid}}\",\"payload\":\"dos\"}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "Caso sutil, y el motivo por el que hace falta decoder.More() ademas del Decode().\n\nSe mandan DOS documentos JSON validos pegados. json.Decoder decodifica el primero y se para: sin comprobar si queda algo detras, el sobre 'uno' se aceptaria y 'dos' se descartaria en silencio.\n\nEsperado: 400 INVALID_PAYLOAD.\n\nPor que importa: es la forma de smuggling que aprovecha que emisor y receptor no cuentan lo mismo. Si un proxy o un log intermedio interpreta el cuerpo como dos mensajes y el backend solo procesa uno, lo que queda registrado deja de coincidir con lo que realmente se entrego.\n\nMismo control en ValidateMessage para los frames del cliente."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('400', () => pm.response.to.have.status(400));",
-                  "pm.test('INVALID_PAYLOAD', () => pm.expect(pm.response.json().reason).to.eql('INVALID_PAYLOAD'));"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — rate limit (100/s) -> 429",
-          "request": {
-            "method": "POST",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{token}}" },
-              { "key": "Content-Type", "value": "application/json" }
-            ],
-            "body": { "mode": "raw", "raw": "{\n  \"sesion\": \"{{sid}}\",\n  \"payload\": \"rafaga\"\n}" },
-            "url": { "raw": "{{baseUrl}}/api/push", "host": ["{{baseUrl}}"], "path": ["api", "push"] },
-            "description": "ATENCION: esta es la unica peticion que NO prueba nada lanzandola una sola vez. En ejecucion normal devuelve 202 o 404 y el test pasa sin haber ejercitado el limite.\n\nCOMO PROBARLA DE VERDAD:\n  Collection Runner -> selecciona solo esta peticion -> Iterations: 150, Delay: 0 ms\n  A partir de la peticion 100 dentro del mismo segundo debe empezar a devolver 429.\n\nEsperado en rafaga: 429 RATE_LIMIT_EXCEEDED / 4008.\n\nEl limitador es una ventana deslizante de 1 segundo con WS_PUSH_RATE_LIMIT_PER_SEC (100). A diferencia del limitador por conexion del canal WebSocket (20/s), este es GLOBAL del endpoint y lo comparten todos los llamantes, por eso necesita mutex (pushMu): sin el, varias peticiones simultaneas corromperian el slice de marcas de tiempo.\n\nConsecuencia operativa: el limite es del endpoint entero, asi que un .NET que dispare rafagas puede agotar el cupo del resto de llamantes."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('202, 404 o 429', () => pm.expect(pm.response.code).to.be.oneOf([202, 404, 429]));",
-                  "if (pm.response.code === 429) {",
-                  "  const b = pm.response.json();",
-                  "  pm.test('RATE_LIMIT_EXCEEDED / 4008', () => {",
-                  "    pm.expect(b.reason).to.eql('RATE_LIMIT_EXCEEDED');",
-                  "    pm.expect(b.code).to.eql(4008);",
-                  "  });",
-                  "}"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "POST /api/push — forma real del .NET (Sesion/Identificador/Payload)",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{token}}"
-              },
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"Sesion\": \"{{sid}}\",\n  \"Identificador\": 130,\n  \"Payload\": {\n    \"CodigoError\": \"COD000\",\n    \"Datos\": [\n      {\n        \"codigoError\": \"COD005\",\n        \"opstatus\": 0,\n        \"mensaje\": \"Su sesion ha expirado!\",\n        \"httpStatusCode\": 200\n      }\n    ],\n    \"Mensaje\": \"OK\"\n  }\n}"
-            },
-            "url": {
-              "raw": "{{baseUrl}}/api/push",
-              "host": [
-                "{{baseUrl}}"
-              ],
-              "path": [
-                "api",
-                "push"
-              ]
-            },
-            "description": "LA FORMA REAL que envia el backend .NET, con las tres claves en mayuscula y el Identificador.\n\nTres cosas que esta peticion documenta:\n\n1. Payload es JSON en crudo: normalmente un objeto, pero vale cualquier JSON valido. El canal no interpreta su contenido, lo sanea como texto y lo entrega verbatim, asi que el .NET puede cambiar la forma de dentro sin tocar este servicio. El frontend lo recibe ya como objeto: NO hace falta JSON.parse.\n\n2. Identificador es opcional y viaja intacto hasta el navegador, para que el front pueda casar lo que recibe con lo que se pidio.\n\n3. Las mayusculas no son obligatorias en la ENTRADA: encoding/json empareja las claves ignorando mayusculas, asi que {sesion, payload} en minuscula sigue valiendo. Lo que si importa es que no haya campos que el esquema no conozca (esquema cerrado -> 400 INVALID_PAYLOAD).\n\nLO QUE RECIBE EL NAVEGADOR:\n  {\"type\":\"push\",\"id\":\"push\",\"ts\":...,\"instance\":\"...\",\n   \"Sesion\":\"{{sid}}\",\"Identificador\":130,\"Payload\":{...objeto verbatim...}}\n\nRegla de la grafia: mayuscula lo que es dato, minuscula lo que es protocolo del canal."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('202 si hay cliente conectado, 404 si no', () => {",
-                  "  pm.expect(pm.response.code).to.be.oneOf([202, 404]);",
-                  "});",
-                  "const b = pm.response.json();",
-                  "pm.test('la respuesta usa la grafia del .NET', () => {",
-                  "  pm.expect(b.Sesion).to.eql(pm.collectionVariables.get('sid'));",
-                  "});",
-                  "if (pm.response.code === 202) {",
-                  "  pm.test('entregado a alguna conexion', () => pm.expect(b.delivered).to.be.above(0));",
-                  "} else {",
-                  "  pm.test('SESSION_NOT_FOUND', () => pm.expect(b.reason).to.eql('SESSION_NOT_FOUND'));",
-                  "}"
-                ]
-              }
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "name": "03 — Outbox (cliente -> .NET)",
-      "description": "El sentido inverso del puente: lo que el cliente manda por WebSocket viaja al backend .NET 4.8 en el mismo sobre {sesion, payload}.\n\nPor que existe este endpoint: todavia no hay URL del .NET. Con WS_DOTNET_WEBHOOK_URL vacio el sistema entra en MODO INSPECCION — los sobres se guardan en memoria en un buffer circular (WS_OUTBOX_SIZE = 200, tira el mas antiguo al llenarse) en vez de mandarse a ningun sitio. Asi se puede verificar el contrato exacto sin tener el otro extremo levantado.\n\nCon la URL configurada, cada sobre se envia ademas por POST en una goroutine aparte: el .NET no puede frenar el bucle de lectura del cliente, y un fallo suyo se registra y se descarta sin tumbar la conexion.\n\nCOMO LLENARLO: los sobres solo se crean cuando un cliente manda un mensaje type=echo por el WebSocket (los ping no generan sobre). Sin WS abierto, el outbox estara siempre vacio y count sera 0 — eso no es un fallo.\n\nFlujo completo de prueba: abre el WS (carpeta 04) -> manda un echo -> vuelve aqui y comprueba que el sobre aparece con el sid que salio de TU token.",
-      "item": [
-        {
-          "name": "GET /api/outbox",
-          "request": {
-            "method": "GET",
-            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
-            "url": { "raw": "{{baseUrl}}/api/outbox", "host": ["{{baseUrl}}"], "path": ["api", "outbox"] },
-            "description": "Lee el buffer de sobres pendientes de entregar al .NET 4.8.\n\nDevuelve:\n  webhookUrl — WS_DOTNET_WEBHOOK_URL. Cadena vacia = modo inspeccion, no se esta mandando nada a ningun sitio\n  count      — numero de sobres guardados\n  items      — array de {sesion, payload}, del mas antiguo al mas reciente\n\nEsperado: 200. Con el sistema recien arrancado y sin ningun echo enviado, count sera 0 e items un array vacio: correcto.\n\nLos tests comprueban la coherencia del contrato (items.length === count) y que cada sobre lleve los dos campos, que es lo que el .NET va a consumir.\n\nEl campo se llama `sesion` en castellano a proposito: es el nombre acordado del contrato con el .NET 4.8, no un descuido de nomenclatura. Lo mismo en la ruta del push."
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
-                  "const b = pm.response.json();",
-                  "pm.test('estructura del outbox', () => {",
-                  "  pm.expect(b).to.have.property('webhookUrl');",
-                  "  pm.expect(b.items).to.be.an('array');",
-                  "  pm.expect(b.items.length).to.eql(b.count);",
-                  "});",
-                  "pm.test('cada sobre lleva sesion y payload', () => {",
-                  "  b.items.forEach(it => {",
-                  "    pm.expect(it).to.have.property('sesion');",
-                  "    pm.expect(it).to.have.property('payload');",
-                  "  });",
-                  "});"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "GET /api/outbox — sin token -> 401",
+          "name": "2. Diagnostico: por que fallo el handshake",
           "request": {
             "method": "GET",
             "header": [],
-            "url": { "raw": "{{baseUrl}}/api/outbox", "host": ["{{baseUrl}}"], "path": ["api", "outbox"] },
-            "description": "El outbox tambien esta autenticado, y aqui el motivo es de confidencialidad mas que de integridad.\n\nEsperado: 401 TOKEN_MISSING / 4001.\n\nEste endpoint expone el contenido de los mensajes de TODOS los usuarios junto a su identificador de sesion. Abierto, seria una fuga directa de datos de terceros: cualquiera podria leer lo que los demas escriben por el canal.\n\nRevela ademas WS_DOTNET_WEBHOOK_URL, que es informacion de topologia interna util para un atacante.\n\nQue sea un endpoint de diagnostico del POC no lo hace menos sensible — al reves, es justo el tipo de ruta auxiliar que se olvida proteger."
+            "url": {
+              "raw": "{{baseUrl}}/ws?token=esto-no-es-un-token",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ws"
+              ],
+              "query": [
+                {
+                  "key": "token",
+                  "value": "esto-no-es-un-token"
+                }
+              ]
+            },
+            "description": "Cuando el handshake se rechaza, el navegador solo te da el codigo de cierre 1006, sin\ndecir por que. Es una limitacion de su API WebSocket, no del servidor.\n\nLa solucion: repetir la MISMA URL como GET normal, cambiando `ws://` por `http://`. El\nservidor responde el veredicto en JSON sin abrir ningun socket.\n\nAqui se manda un token con basura para ver la forma de la respuesta. El `reason` cambia\nsegun el caso real:\n\n  TOKEN_MISSING (4001)         no mandaste token\n  TOKEN_INVALID (4002)         firma incorrecta, o `alg` distinto de HS256\n  TOKEN_EXPIRED (4003)         se te caduco: hay que volver a canjear\n  TOKEN_CLAIMS_INVALID (4004)  emisor, audiencia o sesion que no cuadran\n  ORIGIN_NOT_ALLOWED (4403)    tu origen no esta en la lista blanca\n  SERVER_AT_CAPACITY (4013)    el servidor esta lleno\n\nEste es el endpoint al que tienes que caer cuando el socket muera con 1006."
           },
           "event": [
             {
@@ -1376,25 +201,56 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('401', () => pm.response.to.have.status(401));",
-                  "pm.test('TOKEN_MISSING / 4001', () => {",
-                  "  const b = pm.response.json();",
-                  "  pm.expect(b.reason).to.eql('TOKEN_MISSING');",
-                  "  pm.expect(b.code).to.eql(4001);",
-                  "});"
+                  "pm.test('401 con el motivo real', () => pm.response.to.have.status(401));",
+                  "const b = pm.response.json();",
+                  "",
+                  "pm.test('dice por que, que es lo que el 1006 se calla', () => {",
+                  "  pm.expect(b.allowed).to.eql(false);",
+                  "  pm.expect(b.reason, 'el motivo legible').to.be.a('string').and.to.not.be.empty;",
+                  "  pm.expect(b.code, 'el codigo de cierre que habrias visto').to.be.a('number');",
+                  "});",
+                  "",
+                  "console.log('El socket se habria cerrado con ' + b.code + ': ' + b.reason);"
                 ]
               }
             }
-          ]
+          ],
+          "response": []
         },
         {
-          "name": "POST /api/outbox -> 405 METHOD_NOT_ALLOWED",
+          "name": "3. Reutilizar una SESION conectada -> 409",
           "request": {
             "method": "POST",
-            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
-            "body": { "mode": "raw", "raw": "{}" },
-            "url": { "raw": "{{baseUrl}}/api/outbox", "host": ["{{baseUrl}}"], "path": ["api", "outbox"] },
-            "description": "El outbox es de SOLO LECTURA: solo acepta GET.\n\nEsperado: 405 METHOD_NOT_ALLOWED.\n\nEl contenido se alimenta unicamente desde el bucle del WebSocket, cuando un cliente manda un echo. No hay forma de inyectar sobres por HTTP, y eso es deliberado: si se pudiera, cualquiera con un token podria fabricar mensajes atribuidos a la sesion de otro usuario y colarlos en el flujo hacia el .NET 4.8, saltandose por completo el canal WebSocket y su validacion.\n\nEl equivalente en la otra direccion es el caso 'PUT /api/push -> 405' de la carpeta 02: cada endpoint acepta un solo verbo y rechaza el resto explicitamente."
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Origin",
+                "value": "{{allowedOrigin}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/session-token",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "session-token"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"SESION\": \"{{sid}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Que pasa si el frontend reutiliza el numero de una sesion que aun tiene el socket\nabierto: 409 SESSION_IN_USE.\n\nEs deliberado. Como la SESION es un numero, sin esta guarda bastaria con probar\n1, 2, 3... para pedir el token del canal de otro usuario.\n\nPara el frontend significa: al reconectar, estrena numero. Si te sale 409, el socket\nanterior todavia no ha muerto.\n\nNOTA: solo da 409 si hay un socket abierto con `{{sid}}`. Sin conexion viva responde\n200, que tambien es correcto — por eso el test acepta los dos."
           },
           "event": [
             {
@@ -1402,27 +258,180 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test('405', () => pm.response.to.have.status(405));",
-                  "pm.test('METHOD_NOT_ALLOWED', () => pm.expect(pm.response.json().reason).to.eql('METHOD_NOT_ALLOWED'));"
+                  "pm.test('200 si la sesion esta libre, 409 si ya esta conectada', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 409]);",
+                  "});",
+                  "",
+                  "if (pm.response.code === 409) {",
+                  "  pm.test('SESSION_IN_USE / 4016', () => {",
+                  "    const b = pm.response.json();",
+                  "    pm.expect(b.reason).to.eql('SESSION_IN_USE');",
+                  "    pm.expect(b.code).to.eql(4016);",
+                  "  });",
+                  "} else {",
+                  "  console.log('No habia socket abierto con ' + pm.collectionVariables.get('sid') +",
+                  "    '. Abre un WebSocket Request a mano y repite para ver el 409.');",
+                  "}"
                 ]
               }
             }
-          ]
+          ],
+          "response": []
         }
       ]
     },
     {
-      "name": "04 — WebSocket (/ws)",
-      "description": "El canal WebSocket en si, que es lo unico que NO se puede probar con una peticion HTTP de coleccion.\n\nPostman soporta WebSockets, pero solo como un tipo de peticion aparte (New > WebSocket) y unicamente en la APP DE ESCRITORIO — no en el navegador. Por eso esta carpeta contiene una nota con instrucciones en vez de peticiones ejecutables.\n\nLo que ya esta cubierto sin abrir el socket: todos los controles pre-upgrade (origen, token, capacidad) se verifican en la carpeta 01, porque handleWS responde al GET normal con el veredicto en JSON.\n\nLo que solo se ve con el socket abierto: el bucle de la conexion — validacion de mensajes, rate limit por conexion, idle timeout, limite de frame y los codigos de cierre 4008/4009/4010/4014.\n\nAbre la peticion 'LEEME' para los mensajes exactos y la lista de casos.",
+      "name": "02 — .NET 4.8 (lo que tiene que exponer)",
+      "description": "Lo que el equipo de .NET tiene que IMPLEMENTAR para que el ciclo se cierre.\n\nOjo: aqui no se prueba nada de Go. Estas peticiones apuntan a `{{dotnetUrl}}`, es decir\nal endpoint del .NET, y comprueban que su respuesta cumple exactamente lo que Go valida.\nSon las mismas reglas que aplica `RespuestaBackend()` en\n`internal/protocol/validate.go`.\n\nAbre 'LEEME' y pasaselo al encargado del .NET.",
       "item": [
         {
-          "name": "LEEME — como probar el canal WS",
+          "name": "LEEME — que tiene que construir el .NET",
           "request": {
             "method": "GET",
             "header": [],
-            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] },
-            "description": "Esta peticion apunta a /health solo para que sea ejecutable sin efectos. Lo util esta en esta descripcion.\n\nCOMO ABRIR EL CANAL\n  1. Ejecuta cualquier peticion de la coleccion: el pre-request script deja el JWT firmado en la variable {{token}}\n  2. Copia su valor (Variables de la coleccion > token > Current value)\n  3. New > WebSocket Request\n  4. URL: ws://127.0.0.1:8084/ws?token=<pega aqui el token>\n\nEl token va en la query string porque el WebSocket del navegador no permite mandar cabeceras en el handshake. La sesion del cliente sale del token: claim sid, si no SESION, si no sub. Nunca de algo que declare el cliente. Si el frontend no firma tokens, los canjea en POST /api/session-token (carpeta 01b) y usa ese: ws://127.0.0.1:8084/ws?token=<token canjeado>\n\nMENSAJES VALIDOS (esquema estricto: los cuatro campos, ni uno mas)\n\n  {\"type\":\"ping\",\"id\":\"m1\",\"ts\":1700000000000,\"payload\":\"\"}\n      -> {\"type\":\"pong\",\"id\":\"m1\",...}\n\n  {\"type\":\"echo\",\"id\":\"m2\",\"ts\":1700000000000,\"payload\":\"hola\"}\n      -> {\"type\":\"echo\",\"id\":\"m2\",\"Payload\":\"hola\",...}\n      -> y ademas encola el sobre {Sesion, Payload} visible en GET /api/outbox\n\nLA GRAFIA (lo primero que despista al escribir el frontend): se ENVIA payload en minuscula y se RECIBE Payload en mayuscula. La regla es: mayuscula lo que es dato (Sesion, Identificador, Payload, con el nombre que les da el .NET), minuscula lo que es protocolo del canal (type, id, ts, instance, reason).\n\nUn push del .NET llega asi:\n  {\"type\":\"push\",\"id\":\"push\",\"ts\":...,\"instance\":\"...\",\n   \"Sesion\":\"<tu sid>\",\"Identificador\":130,\"Payload\":{...objeto del .NET...}}\n\nEl tipo de Payload depende del type del frame: objeto en un push (verbatim del .NET), cadena en un echo (lo que mando el cliente) y cadena vacia en pong y error. En un push NO hace falta JSON.parse.\n\nLa respuesta lleva campos extra (instance, Sesion) de forma legitima: el esquema estricto solo rige en sentido cliente -> servidor.\n\nCASOS DE CIERRE A COMPROBAR\n\n  campo extra, type desconocido, ts ausente o id no seguro\n      -> llega un frame {\"type\":\"error\",\"reason\":\"INVALID_PAYLOAD\"} y DESPUES el close 4010.\n         El frame de error se envia antes de cerrar a proposito (FlushPending en closeWith)\n  payload con <script> o javascript:  -> close 4010 INVALID_PAYLOAD\n  mas de 20 mensajes en un segundo    -> close 4008 RATE_LIMIT_EXCEEDED (WS_RATE_LIMIT_PER_SEC)\n  frame de mas de 65536 bytes         -> close 4009 MESSAGE_TOO_LARGE\n  60 s sin dar senales                -> close 4014 IDLE_TIMEOUT (WS_IDLE_TIMEOUT_SECONDS).\n         OJO: el servidor manda un ping cada 30 s y Postman responde el pong solo, asi que\n         una ventana abierta NO se cae por estar callada. Para verlo hay que ir a la pestana\n         Settings de la WebSocket Request y desactivar la respuesta automatica al ping\n  frame binario en vez de texto       -> close 4010 INVALID_PAYLOAD\n\nSi ves un cierre 1006 en vez del codigo esperado, es que el TCP se corto antes de que el frame de cierre saliera; closeWith drena la conexion medio segundo justo para evitarlo.\n\nPRUEBA DE EXTREMO A EXTREMO DEL PUENTE\n\n  Sentido .NET -> cliente:\n    con el WS abierto, lanza '02 — Push > forma real del .NET' con el mismo Sesion={{sid}}\n    -> debe responder 202 delivered:1 y aparecer {\"type\":\"push\"} en la ventana del WebSocket\n\n  Sentido cliente -> .NET:\n    manda un echo por el WS, luego lanza '03 — Outbox > GET /api/outbox'\n    -> el sobre debe aparecer en items con tu sid\n\n  Comprueba tambien GET /health: activeConnections debe subir a 1 mientras el socket este abierto."
-          }
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "PARA EL ENCARGADO DEL BACKEND .NET 4.8\n\nNo tienes que consumir ningun endpoint de Go. Tienes que EXPONER uno que Go va a llamar.\n\n  frontend --WebSocket--> Go --POST a TU endpoint--> .NET (validas y tocas BD)\n  frontend <--WebSocket-- Go <--tu respuesta HTTP---\n\nGo se queda esperando tu respuesta y la baja al navegador tal cual. No mira dentro del\nPayload ni lo reescribe: lo que devuelvas es lo que ve el frontend.\n\nLO QUE TE VA A LLEGAR\n\n  POST <tu ruta>\n  Content-Type: application/json\n\n  {\"Sesion\":\"4815162342\",\"Payload\":{\"numero\":7}}\n\n  Sesion   identifica la conexion del usuario. Es dato nuestro: no tienes que hacer nada\n           con el, mas alla de devolverlo si quieres.\n  Payload  el objeto tal cual lo mando el frontend. Su forma la decidis el frontend y tu.\n\nLO QUE TIENES QUE DEVOLVER, EN ESA MISMA RESPUESTA HTTP\n\n  200 OK\n  Content-Type: application/json\n\n  {\"Sesion\":\"\",\"Payload\":{\"numero\":7,\"estado\":\"APROBADO\"}}\n\n  Sesion   PUEDES DEJARLA VACIA. Go ya sabe quien pregunto. Si la rellenas, tiene que ser\n           EXACTAMENTE la misma que te llego: si devuelves otra distinta, Go descarta la\n           respuesta a proposito (entregarla seria mandarle a un usuario la respuesta de\n           otro).\n  Payload  obligatorio y no vacio. Es lo que vera el frontend.\n\nLAS SEIS REGLAS QUE TE VAN A MORDER\n\n  1. ESQUEMA CERRADO. Solo se admiten las claves `Sesion`, `Payload` y (opcional)\n     `Identificador` en el NIVEL SUPERIOR. Un `{\"Success\":true,\"Data\":{...}}` envolviendo\n     la respuesta la hace fallar entera. Dentro de `Payload` puedes poner lo que quieras.\n     Es la regla que mas veces rompe a la primera.\n\n  2. `Payload` no puede faltar ni venir vacio.\n\n  3. TIEMPO. Tienes 5 segundos (WS_DOTNET_TIMEOUT_SECONDS). Si tu consulta a BD puede\n     tardar mas, dilo y lo subimos. Pasado el plazo el usuario ve un error aunque tu\n     acabes respondiendo bien.\n\n  4. TAMANO. La respuesta entera, como mucho 64 KB. El `Payload` serializado, como mucho\n     8192 caracteres.\n\n  5. CODIGO HTTP. Cualquier cosa que no sea 2xx se trata como fallo y el usuario recibe\n     un error. Si una validacion de negocio RECHAZA el numero, eso NO es un 400: es un\n     200 con el estado que corresponda dentro del Payload. El 4xx/5xx es para cuando tu\n     servicio falla, no para cuando el numero no pasa la validacion.\n\n  6. NADA DE HTML/SCRIPT en el Payload. El texto acaba en el DOM del navegador, asi que\n     Go rechaza `<script`, `javascript:`, `onerror=`, `onload=`, `<iframe` y\n     `data:text/html`. No metas HTML en los mensajes de estado.\n\nCOMO PROBARLO\n\n  1. Pon la URL de tu endpoint en la variable de coleccion `dotnetUrl`.\n  2. Ejecuta las peticiones de esta carpeta. Comprueban exactamente lo mismo que\n     comprueba Go, asi que si pasan en verde, tu endpoint encaja.\n  3. Danos la URL: la ponemos en WS_DOTNET_API_URL y el ciclo queda cerrado.\n\nUNA DUDA QUE NOS TIENES QUE RESOLVER\n\n  Si tu endpoint tarda mas de la cuenta y Go corta por timeout: el numero, ?queda ya\n  cambiado en tu BD? Si es asi, el frontend creeria que fallo cuando en realidad el\n  cambio si se aplico. Eso no lo podemos arreglar desde Go.\n\nUNA COSA QUE FALTA Y QUE VAS A PREGUNTAR\n\n  Hoy Go te llama SIN ninguna credencial: solo `Content-Type: application/json`. No\n  tienes forma de comprobar que la peticion viene de Go y no de cualquiera que alcance\n  tu endpoint.\n\n  Esta identificado como pendiente. Dinos que sabe validar tu lado —una cabecera con un\n  secreto compartido, una IP de origen, mTLS— y Go la manda. No lo hemos decidido por ti\n  porque el que tiene que verificarlo eres tu."
+          },
+          "response": []
+        },
+        {
+          "name": "Camino feliz — el numero vuelve con estado",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{dotnetUrl}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"Sesion\": \"{{sid}}\",\n  \"Payload\": {\n    \"numero\": {{numero}}\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Lo que Go le manda al .NET, exactamente como sale por el cable.\n\nEl `Identificador` no se envia: como la llamada es sincrona, Go ya sabe a que\npeticion corresponde la respuesta. El .NET no tiene que devolverlo.\n\nLos 9 tests son los mismos controles que aplica Go a la respuesta. En verde = encaja."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Estas comprobaciones son las MISMAS que hace Go en internal/protocol/validate.go",
+                  "// (RespuestaBackend). Si pasan aqui, la respuesta le vale a Go.",
+                  "",
+                  "pm.test('1. responde 2xx', () => pm.expect(pm.response.code).to.be.within(200, 299));",
+                  "",
+                  "pm.test('2. responde antes de 5 s (WS_DOTNET_TIMEOUT_SECONDS)', () => {",
+                  "  pm.expect(pm.response.responseTime).to.be.below(5000);",
+                  "});",
+                  "",
+                  "pm.test('3. el cuerpo cabe en 64 KB', () => {",
+                  "  pm.expect(pm.response.responseSize).to.be.below(65536);",
+                  "});",
+                  "",
+                  "let b;",
+                  "pm.test('4. el cuerpo es JSON', () => { b = pm.response.json(); });",
+                  "",
+                  "pm.test('5. esquema CERRADO: solo Sesion, Payload e Identificador arriba', () => {",
+                  "  const permitidas = ['Sesion', 'sesion', 'Payload', 'payload', 'Identificador', 'identificador'];",
+                  "  const sobran = Object.keys(b).filter((k) => !permitidas.includes(k));",
+                  "  pm.expect(sobran, 'claves de mas en el nivel superior: ' + sobran.join(', ') +",
+                  "    ' — Go rechaza la respuesta entera. Mete todo eso dentro de Payload.').to.be.empty;",
+                  "});",
+                  "",
+                  "pm.test('6. Payload presente y no vacio', () => {",
+                  "  const payload = b.Payload ?? b.payload;",
+                  "  pm.expect(payload, 'falta Payload').to.not.be.undefined;",
+                  "  pm.expect(JSON.stringify(payload)).to.not.eql('{}');",
+                  "});",
+                  "",
+                  "pm.test('7. Payload serializado <= 8192 caracteres', () => {",
+                  "  pm.expect(JSON.stringify(b.Payload ?? b.payload).length).to.be.at.most(8192);",
+                  "});",
+                  "",
+                  "pm.test('8. Payload sin HTML ni script', () => {",
+                  "  const texto = JSON.stringify(b.Payload ?? b.payload).toLowerCase();",
+                  "  const prohibidos = ['<script', 'javascript:', 'onerror=', 'onload=', '<iframe', 'data:text/html'];",
+                  "  const encontrados = prohibidos.filter((p) => texto.includes(p));",
+                  "  pm.expect(encontrados, 'patrones que Go rechaza: ' + encontrados.join(', ')).to.be.empty;",
+                  "});",
+                  "",
+                  "pm.test('9. la Sesion es la nuestra, o viene vacia', () => {",
+                  "  const s = b.Sesion ?? b.sesion ?? '';",
+                  "  pm.expect(s, 'devolviste una Sesion distinta de la que te llego: Go descarta la respuesta')",
+                  "    .to.be.oneOf(['', pm.collectionVariables.get('sid')]);",
+                  "});",
+                  "",
+                  "pm.test('10. el numero vuelve en la respuesta', () => {",
+                  "  const payload = b.Payload ?? b.payload;",
+                  "  pm.expect(String(payload.numero ?? payload.Numero),",
+                  "    'el frontend necesita saber de que numero es este estado')",
+                  "    .to.eql(pm.collectionVariables.get('numero'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Numero rechazado por validacion -> sigue siendo 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{dotnetUrl}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"Sesion\": \"{{sid}}\",\n  \"Payload\": {\n    \"numero\": 999999999\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Una validacion de negocio que RECHAZA el numero no es un error HTTP.\n\nGo trata cualquier cosa que no sea 2xx como fallo del backend, y el usuario recibe\nBACKEND_ERROR en vez de su estado. El rechazo del numero es informacion de negocio:\nva en un 200, dentro del Payload, con el estado que corresponda.\n\nAjusta el `numero` a uno que tu logica rechace y comprueba que aun asi responde 200."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('un numero rechazado sigue devolviendo 200', () => {",
+                  "  pm.expect(pm.response.code, 'un 4xx aqui haria que el usuario viera BACKEND_ERROR ' +",
+                  "    'en vez del motivo del rechazo').to.be.within(200, 299);",
+                  "});",
+                  "",
+                  "pm.test('el motivo del rechazo viaja dentro del Payload', () => {",
+                  "  const b = pm.response.json();",
+                  "  const payload = b.Payload ?? b.payload;",
+                  "  pm.expect(payload, 'falta Payload: el frontend no sabria por que se rechazo').to.not.be.undefined;",
+                  "  pm.expect(JSON.stringify(payload)).to.not.be.oneOf(['{}', 'null']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
         }
       ]
     }

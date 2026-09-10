@@ -30,11 +30,7 @@ func NewIssuer(cfg config.Config) Issuer { return Issuer{cfg: cfg} }
 //
 // La sesión se escribe en `sid`, en `SESION` y en `sub`: los tres claims que
 // CheckToken sabe leer. Emitir los tres hace que el token valga igual si mañana
-// lo verifica otro de los backends del POC con un orden de preferencia distinto.
-//
-// El token sale marcado con `canal`: abre el WebSocket y nada más. Sin esa marca,
-// serviría también para el puente REST, y cualquiera que canjeara una SESION
-// podría empujar mensajes a la sesión de otro (ver CheckBridgeToken).
+// lo verifica otro backend con un orden de preferencia distinto.
 func (i Issuer) ForSession(session string) (string, time.Duration, error) {
 	if !protocol.ValidSessionID(session) {
 		return "", 0, ErrInvalidSession
@@ -53,7 +49,6 @@ func (i Issuer) ForSession(session string) (string, time.Duration, error) {
 		},
 		Sid:    session,
 		Sesion: session,
-		Canal:  true,
 	})
 
 	raw, err := token.SignedString([]byte(i.cfg.JWTSecret))

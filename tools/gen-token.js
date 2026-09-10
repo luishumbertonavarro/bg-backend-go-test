@@ -20,7 +20,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 function loadEnv() {
-  const file = path.join(__dirname, '..', '.env');
+  const file = path.join(__dirname, '..', 'backend-go', '.env');
   const env = {};
   if (fs.existsSync(file)) {
     for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
@@ -92,7 +92,7 @@ for (let i = 0; i < argv.length; i++) {
 
 const env = loadEnv();
 if (!env.WS_JWT_SECRET) {
-  console.error('Falta WS_JWT_SECRET (revisa el .env de la raíz).');
+  console.error('Falta WS_JWT_SECRET (revisa backend-go/.env).');
   process.exit(1);
 }
 

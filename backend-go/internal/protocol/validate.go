@@ -58,7 +58,7 @@ func (v Validator) Message(raw []byte) (ClientMessage, *Rejection) {
 		return ClientMessage{}, rejected(InvalidPayload)
 	}
 
-	if msg.Type != TypeEcho && msg.Type != TypePing {
+	if msg.Type != TypeEcho && msg.Type != TypePing && msg.Type != TypePeticion {
 		return ClientMessage{}, rejected(InvalidPayload)
 	}
 	if msg.TS == 0 {
@@ -67,7 +67,20 @@ func (v Validator) Message(raw []byte) (ClientMessage, *Rejection) {
 	if !isValidID(msg.ID, maxIDChars) {
 		return ClientMessage{}, rejected(InvalidPayload)
 	}
-	if !isCleanText(msg.Payload) {
+	// Una `peticion` sin contenido no tiene nada que preguntarle al .NET. El eco
+	// y el ping sí pueden venir vacíos, y para ellos un payload ausente se
+	// normaliza a la cadena vacía en vez de dejar un `null` que el cliente
+	// recibiría de vuelta como algo que no envió.
+	if len(msg.Payload) == 0 {
+		if msg.Type == TypePeticion {
+			return ClientMessage{}, rejected(InvalidPayload)
+		}
+		msg.Payload = RawText("")
+	}
+	// Se sanea el JSON ya serializado, que es exactamente lo que acabará en el
+	// DOM del navegador. Mismo criterio que Envelope: el canal no puede ser un
+	// camino más laxo que el REST.
+	if !isCleanText(string(msg.Payload)) {
 		return ClientMessage{}, rejected(InvalidPayload)
 	}
 	return msg, nil
@@ -93,6 +106,34 @@ func (v Validator) Envelope(raw []byte) (Envelope, *Rejection) {
 	// El saneado se aplica al JSON ya serializado, no a un texto suelto: es
 	// exactamente lo que acabará en el DOM del navegador, así que es lo que hay
 	// que revisar. Que sea JSON válido lo garantiza el propio decodificador.
+	if !isCleanText(string(env.Payload)) {
+		return Envelope{}, rejected(InvalidPayload)
+	}
+	return env, nil
+}
+
+// RespuestaBackend valida el sobre con el que el .NET 4.8 contesta a una
+// `peticion`.
+//
+// Se parece a Envelope pero difiere en un punto deliberado: aquí la `Sesion`
+// PUEDE venir vacía. En un round-trip síncrono Go ya sabe quién preguntó, así
+// que obligar al .NET a devolverla sería pedirle que repita un dato que no
+// aporta nada — y dejaría fuera a cualquier mock con respuesta enlatada. Si
+// viene, tiene que ser un identificador utilizable, porque entonces sí decide a
+// dónde se entrega.
+func (v Validator) RespuestaBackend(raw []byte) (Envelope, *Rejection) {
+	var env Envelope
+	if err := decodeStrict(raw, &env); err != nil {
+		return Envelope{}, rejected(InvalidPayload)
+	}
+	if env.Session != "" && !isValidID(env.Session, maxSessionChars) {
+		return Envelope{}, rejected(InvalidSession)
+	}
+	if len(env.Payload) == 0 {
+		return Envelope{}, rejected(InvalidPayload)
+	}
+	// El mismo saneado que en el resto: lo que responde el .NET acaba en el DOM
+	// igual que un push, así que no puede entrar por una puerta más laxa.
 	if !isCleanText(string(env.Payload)) {
 		return Envelope{}, rejected(InvalidPayload)
 	}

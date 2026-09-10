@@ -42,6 +42,28 @@ var (
 	OriginNotAllowed   = Rejection{"ORIGIN_NOT_ALLOWED", 4403, http.StatusForbidden}
 	SessionNotFound    = Rejection{"SESSION_NOT_FOUND", 404, http.StatusNotFound}
 	Backpressure       = Rejection{"BACKPRESSURE", 4009, http.StatusServiceUnavailable}
+
+	// Fallos del puente con el .NET 4.8. Los tres se informan al cliente SIN
+	// cerrar la conexión: que el backend de negocio falle no es culpa de quien
+	// preguntó, y cerrarle el canal le costaría además todas las peticiones que
+	// tuviera en vuelo.
+	BackendUnavailable = Rejection{"BACKEND_UNAVAILABLE", 4015, http.StatusBadGateway}
+	BackendTimeout     = Rejection{"BACKEND_TIMEOUT", 4015, http.StatusGatewayTimeout}
+	BackendError       = Rejection{"BACKEND_ERROR", 4015, http.StatusBadGateway}
+
+	// BackendBusy indica que hay demasiadas llamadas al .NET en vuelo.
+	//
+	// Tiene motivo propio y no reutiliza BACKPRESSURE porque aquel significa lo
+	// contrario para quien lo recibe: el de la cola de escritura CIERRA la
+	// conexión, y este la deja abierta para que el cliente pueda reintentar. Un
+	// mismo `reason` con dos consecuencias opuestas es indistinguible desde el
+	// frontend.
+	BackendBusy = Rejection{"BACKEND_BUSY", 4015, http.StatusServiceUnavailable}
+
+	// SessionInUse rechaza emitir un token para una sesión que ya está conectada.
+	// Es 409 y no 401 porque no es un problema de credenciales: el identificador
+	// es válido, pero ya lo está usando alguien.
+	SessionInUse = Rejection{"SESSION_IN_USE", 4016, http.StatusConflict}
 )
 
 // Tipos de mensaje que el cliente puede enviar. El enum es cerrado: cualquier
@@ -49,21 +71,32 @@ var (
 const (
 	TypePing = "ping"
 	TypeEcho = "echo"
+	// TypePeticion es una consulta al .NET 4.8: Go la reenvía por REST, espera la
+	// respuesta y la devuelve por este mismo canal. Es el tipo que usa el
+	// frontend real; `echo` se queda para probar el canal sin el .NET delante.
+	TypePeticion = "peticion"
 )
 
 // Tipos de frame que emite el servidor.
 const (
-	TypePong  = "pong"
-	TypePush  = "push"
-	TypeError = "error"
+	TypePong = "pong"
+	// TypeRespuesta es lo que devuelve el .NET a una `peticion`, casado por `id`
+	// con la pregunta del cliente.
+	TypeRespuesta = "respuesta"
+	TypeError     = "error"
 )
 
 // ClientMessage es el único esquema aceptado por el canal.
 type ClientMessage struct {
-	Type    string `json:"type"`
-	ID      string `json:"id"`
-	TS      int64  `json:"ts"`
-	Payload string `json:"payload"`
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	TS   int64  `json:"ts"`
+	// Payload viaja en crudo porque una `peticion` lleva el objeto que el .NET
+	// espera, y su forma es cosa del .NET y del frontend, no de este servicio.
+	//
+	// Sigue aceptando una cadena: `"hola"` es JSON válido, así que los clientes
+	// que solo mandan texto por el canal de eco encajan sin cambiar nada.
+	Payload json.RawMessage `json:"payload"`
 }
 
 // Envelope es el sobre que se intercambia con el backend .NET 4.8, en los dos
@@ -126,15 +159,14 @@ type Frame struct {
 	// Campos de dato, con la grafía del .NET: lo que el navegador lee como
 	// contenido llega escrito igual que salió de allí. La regla del frame es esa:
 	// mayúscula lo que es dato, minúscula lo que es protocolo del canal.
-	Session       string `json:"Sesion"`
-	Identificador int64  `json:"Identificador,omitempty"`
+	Session string `json:"Sesion"`
 	// Payload viaja en crudo para que el objeto del .NET llegue al navegador tal
 	// cual, sin que este servicio lo reescriba ni el frontend tenga que
 	// deserializarlo dos veces.
 	//
-	// Su tipo JSON depende del `type` del frame: objeto en un `push`, cadena en un
-	// `echo` (que devuelve lo que mandó el cliente) y cadena vacía en `pong` y
-	// `error`. El frontend ya distingue por `type`, así que no necesita adivinarlo.
+	// Su tipo JSON depende del `type` del frame: objeto en una `respuesta`, cadena
+	// en un `echo` (que devuelve lo que mandó el cliente) y cadena vacía en `pong`
+	// y `error`. El frontend ya distingue por `type`, así que no lo adivina.
 	Payload json.RawMessage `json:"Payload"`
 }
 
@@ -155,8 +187,28 @@ func (f Framer) Pong(id, session string) Frame {
 }
 
 // Echo devuelve al cliente su propio payload ya validado.
-func (f Framer) Echo(id, payload, session string) Frame {
-	return f.frame(TypeEcho, id, RawText(payload), "", session)
+func (f Framer) Echo(id string, payload json.RawMessage, session string) Frame {
+	return f.frame(TypeEcho, id, payload, "", session)
+}
+
+// Respuesta entrega lo que el .NET 4.8 contestó a una `peticion`.
+//
+// Lleva el `id` con el que el cliente hizo la pregunta, no uno nuevo: es lo
+// único que le permite casar la respuesta con la petición cuando tiene varias en
+// vuelo. Como la llamada al .NET es síncrona, ese `id` no tiene que viajar hasta
+// el .NET ni volver — lo guarda Go mientras espera.
+func (f Framer) Respuesta(id string, payload json.RawMessage, session string) Frame {
+	return f.frame(TypeRespuesta, id, payload, "", session)
+}
+
+// ErrorEn informa de un fallo atribuible a una petición concreta, sin cerrar el
+// canal.
+//
+// Se distingue de Error en que lleva el `id` de la petición: un fallo del .NET
+// tiene que poder despertar al cliente que estaba esperando esa respuesta y solo
+// a ese. Error, en cambio, es el aviso previo a un cierre.
+func (f Framer) ErrorEn(id string, rejection Rejection, session string) Frame {
+	return f.frame(TypeError, id, RawText(""), rejection.Reason, session)
 }
 
 // RawText convierte un texto plano en el JSON que lo representa: la cadena
@@ -168,17 +220,6 @@ func (f Framer) Echo(id, payload, session string) Frame {
 func RawText(text string) json.RawMessage {
 	raw, _ := json.Marshal(text)
 	return raw
-}
-
-// Push entrega a una sesión un payload que llegó del .NET 4.8.
-//
-// El identificador viaja tal cual hasta el navegador: es el correlativo con el
-// que el .NET reconoce su propio mensaje, así que perderlo por el camino dejaría
-// al frontend sin forma de casar lo que recibe con lo que se pidió.
-func (f Framer) Push(payload json.RawMessage, session string, identificador int64) Frame {
-	frame := f.frame(TypePush, TypePush, payload, "", session)
-	frame.Identificador = identificador
-	return frame
 }
 
 // Error informa del motivo antes de cerrar la conexión.

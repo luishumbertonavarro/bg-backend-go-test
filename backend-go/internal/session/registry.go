@@ -100,6 +100,16 @@ func (r *Registry) Deliver(session string, frame protocol.Frame) int {
 	return delivered
 }
 
+// Conectada indica si una sesión tiene ya alguna conexión viva.
+//
+// La usa el intercambio SESION -> token para no repartir un segundo token de una
+// sesión que está en uso. No es una comprobación de propiedad —no hay forma de
+// saber quién es el dueño legítimo— pero cierra el caso realista: adivinar el
+// número de una sesión ajena MIENTRAS su dueño la está usando.
+func (r *Registry) Conectada(session string) bool {
+	return len(r.clientsOf(session)) > 0
+}
+
 // clientsOf devuelve una copia de las conexiones de una sesión.
 //
 // La copia es deliberada: entregar mantiene el lock solo el tiempo de copiar la

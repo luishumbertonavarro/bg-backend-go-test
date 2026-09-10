@@ -63,7 +63,7 @@ if ($previo) {
 # nombre imposible de parar por el del padre.
 Write-Host 'Compilando Go...' -ForegroundColor DarkGray
 Push-Location $dir
-try { & go build -o 'wspoc-go.exe' . } finally { Pop-Location }
+try { & go build -o 'wspoc-go.exe' './cmd/server' } finally { Pop-Location }
 if ($LASTEXITCODE -ne 0) {
     Write-Error 'go build fallo; no se arranca nada. Revisa los errores de compilacion.'
     return

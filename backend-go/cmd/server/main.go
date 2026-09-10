@@ -1,8 +1,8 @@
 // Command server arranca el backend WebSocket del POC.
 //
 // El servicio mantiene el canal con los navegadores y hace de puente con el
-// backend .NET 4.8, que es donde vive la lógica de negocio: le reenvía por el
-// outbox lo que manda el cliente y entrega a la sesión lo que el .NET empuja.
+// backend .NET 4.8, que es donde vive la lógica de negocio: le reenvía por REST
+// lo que pregunta el cliente y le devuelve la respuesta por el mismo canal.
 //
 // Este fichero es el ÚNICO sitio donde se construyen las dependencias y se
 // deciden sus implementaciones concretas. Todo lo demás las recibe ya resueltas,
@@ -19,10 +19,9 @@ import (
 	"syscall"
 	"time"
 
+	"wspoc-go/internal/bridge"
 	"wspoc-go/internal/config"
-	"wspoc-go/internal/delivery"
 	"wspoc-go/internal/logging"
-	"wspoc-go/internal/outbox"
 	"wspoc-go/internal/session"
 	"wspoc-go/internal/transport/httpapi"
 )
@@ -45,10 +44,9 @@ func main() {
 
 	registry := session.NewRegistry(cfg.MaxConnections)
 	api := httpapi.New(httpapi.Deps{
-		Config:    cfg,
-		Registry:  registry,
-		Deliverer: delivery.New(cfg, registry),
-		Outbox:    outbox.New(cfg),
+		Config:   cfg,
+		Registry: registry,
+		Bridge:   bridge.New(cfg),
 	})
 
 	server := &http.Server{
@@ -70,6 +68,14 @@ func main() {
 // No es adorno: cuando una conexión se rechaza en producción, lo primero que hay
 // que saber es con qué configuración está corriendo esta réplica.
 func logStartup(cfg config.Config) {
+	// La procedencia va en su propia línea y la primera: es lo que responde
+	// "¿con qué secreto está firmando esto?" sin tener que adivinarlo.
+	origen := cfg.DotEnvPath
+	if origen == "" {
+		origen = "(ningún .env encontrado; solo variables de entorno)"
+	}
+	logging.Infof("configuración cargada de %s", origen)
+
 	logging.Infof(
 		"WebSocket POC (Go) instancia=%s escuchando en ws://%s:%d/ws — máx %d conexiones, %d msg/s por conexión, "+
 			"mensajes <= %d bytes, idle %ds, orígenes: %s",

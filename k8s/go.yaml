@@ -37,10 +37,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            # Sin esto la entrega es local y un push que caiga en el pod que no
-            # tiene la sesion se perderia. Ver k8s/redis.yaml.
-            - name: WS_REDIS_ADDR
-              value: wspoc-redis:6379
           readinessProbe:
             httpGet:
               path: /health

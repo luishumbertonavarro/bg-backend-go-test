@@ -25,7 +25,7 @@ const http = require('node:http');
 const WebSocket = require('ws');
 
 function loadEnv() {
-  const file = path.join(__dirname, '..', '.env');
+  const file = path.join(__dirname, '..', 'backend-go', '.env');
   const env = {};
   if (fs.existsSync(file)) {
     for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {

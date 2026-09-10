@@ -30,15 +30,30 @@ type Config struct {
 	IdleTimeoutSeconds int
 
 	// Puente con el backend .NET 4.8.
-	DotNetWebhookURL     string // vacío = modo outbox inspeccionable
+	//
+	// DotNetAPIURL es la ruta a la que Go reenvía las `peticion` del cliente y de
+	// la que ESPERA la respuesta. Vacía = no hay a quién preguntar: la petición se
+	// responde BACKEND_UNAVAILABLE y el resto del canal sigue funcionando.
+	DotNetAPIURL         string
 	DotNetTimeoutSeconds int
-	PushRateLimitPerSec  int
-	OutboxSize           int
-	RedisAddr            string // vacío = entrega local, una réplica
+	// DotNetMaxInflight acota cuántas llamadas simultáneas salen hacia el .NET.
+	// Sin tope, WS_MAX_CONNECTIONS × WS_RATE_LIMIT_PER_SEC son miles de peticiones
+	// por segundo contra un Framework 4.8.
+	DotNetMaxInflight int
 
 	// Intercambio SESION -> token para el frontend.
 	SessionTokenTTLSeconds      int
 	SessionTokenRateLimitPerSec int
+
+	// DotEnvPath es el fichero .env del que salió esta configuración, vacío si no
+	// se encontró ninguno.
+	//
+	// Se guarda para poder registrarlo en el arranque. No es un adorno: hubo dos
+	// .env con secretos distintos en el repo y el servidor leía uno mientras las
+	// herramientas leían el otro, así que todo token generado fuera fallaba con
+	// TOKEN_INVALID sin que nada dijera por qué. Un servicio que no dice de dónde
+	// sacó su secreto no se puede diagnosticar.
+	DotEnvPath string
 }
 
 // minSecretBytes es la longitud mínima del secreto HS256. Por debajo de 32 bytes
@@ -50,7 +65,7 @@ const minSecretBytes = 32
 // Devuelve error en vez de abortar el proceso: quién decide morir es main, no una
 // biblioteca. Eso además permite probar la carga sin matar el binario de test.
 func Load() (Config, error) {
-	env := loadDotEnv()
+	env, dotEnvPath := loadDotEnv()
 
 	get := func(key, fallback string) string {
 		if v := os.Getenv(key); v != "" {
@@ -96,11 +111,11 @@ func Load() (Config, error) {
 		MaxConnections:     int32(getInt("WS_MAX_CONNECTIONS", 200)),
 		IdleTimeoutSeconds: getInt("WS_IDLE_TIMEOUT_SECONDS", 60),
 
-		DotNetWebhookURL:     get("WS_DOTNET_WEBHOOK_URL", ""),
+		// El nombre viejo se sigue aceptando: cuando el puente era de ida y sin
+		// respuesta se llamaba webhook, y hay despliegues con esa variable puesta.
+		DotNetAPIURL:         get("WS_DOTNET_API_URL", get("WS_DOTNET_WEBHOOK_URL", "")),
 		DotNetTimeoutSeconds: getInt("WS_DOTNET_TIMEOUT_SECONDS", 5),
-		PushRateLimitPerSec:  getInt("WS_PUSH_RATE_LIMIT_PER_SEC", 100),
-		OutboxSize:           getInt("WS_OUTBOX_SIZE", 200),
-		RedisAddr:            get("WS_REDIS_ADDR", ""),
+		DotNetMaxInflight:    getInt("WS_DOTNET_MAX_INFLIGHT", 32),
 
 		// La vigencia por defecto acompaña a la sesión de login: un token por
 		// login, reutilizable en las reconexiones.
@@ -108,6 +123,8 @@ func Load() (Config, error) {
 		// Tope propio, no compartido con el push: este endpoint lo llama el
 		// navegador, así que es la superficie pública del servicio.
 		SessionTokenRateLimitPerSec: getInt("WS_SESSION_TOKEN_RATE_LIMIT_PER_SEC", 20),
+
+		DotEnvPath: dotEnvPath,
 	}, nil
 }
 
@@ -165,19 +182,24 @@ func instanceID(configured string) string {
 }
 
 // loadDotEnv busca el .env subiendo desde el directorio actual hasta la raíz.
-func loadDotEnv() map[string]string {
+//
+// Devuelve también la ruta del fichero que ganó, para que el arranque pueda
+// decir de dónde salió la configuración. Con varios .env en el árbol, saber cuál
+// se leyó es la diferencia entre un diagnóstico de un minuto y uno de una tarde.
+func loadDotEnv() (map[string]string, string) {
 	values := map[string]string{}
 	dir, err := os.Getwd()
 	if err != nil {
-		return values
+		return values, ""
 	}
 	for {
-		if parsed, ok := parseDotEnv(filepath.Join(dir, ".env")); ok {
-			return parsed
+		path := filepath.Join(dir, ".env")
+		if parsed, ok := parseDotEnv(path); ok {
+			return parsed, path
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return values
+			return values, ""
 		}
 		dir = parent
 	}

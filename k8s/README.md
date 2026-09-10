@@ -6,7 +6,6 @@ cuando ya no hay un único proceso al otro lado.
 ```
 kind-cluster.yaml   Cluster de un nodo, con el NodePort mapeado al host
 common.yaml         Namespace + ConfigMap + Secret
-redis.yaml          Redis (1 réplica) — bus de push entre réplicas
 go.yaml             Deployment (2 réplicas) + Service NodePort 30084
 ```
 
@@ -26,10 +25,8 @@ kind create cluster --config k8s/kind-cluster.yaml
 docker build -t wspoc-go:poc ./backend-go
 kind load docker-image wspoc-go:poc --name wspoc
 
-# 3. Desplegar. Redis ANTES que el backend: sin el, el enrutado del push
-#    entre replicas no funciona (go.yaml apunta a wspoc-redis:6379).
+# 3. Desplegar.
 kubectl apply -f k8s/common.yaml
-kubectl apply -f k8s/redis.yaml
 kubectl apply -f k8s/go.yaml
 kubectl -n wspoc get pods
 
@@ -77,21 +74,19 @@ Todos los controles siguen en pie tras el despliegue: **`probe.js` da 17/17** co
 node tools/probe.js --url ws://localhost:30084/ws
 ```
 
-### El push entre réplicas
+### No hace falta bus entre réplicas
 
-Con 2 pods, la conexión de un usuario vive en **uno solo**. Un `POST /api/push` al Service puede
-caer en el otro, que no la tiene. Por eso `go.yaml` define `WS_REDIS_ADDR`: el push se publica en
-Redis, ambas réplicas están suscritas y entrega la que tiene la conexión.
+Todo el ciclo ocurre dentro del pod que tiene la conexión: la `peticion` sube por ese socket, la
+llamada al .NET la hace ese mismo proceso y la respuesta baja por ese mismo socket. Con N réplicas
+no hay nada que enrutar de un pod a otro.
 
-```powershell
-# Conectar la UI al NodePort con una sesión conocida y empujar repetidamente:
-# debe llegar SIEMPRE, caiga el POST en el pod que caiga.
-node tools/gen-token.js --sid ana-1
-node tools/push.js --url http://localhost:30084 --sesion ana-1 --payload "hola"
-```
+Antes sí lo había. Existía `POST /api/push`, que llegaba por el Service y podía caer en el pod que
+**no** tenía la sesión: con 2 réplicas, la mitad de los push devolvían 404. Por eso este despliegue
+incluía un Redis (`WS_REDIS_ADDR`, canal `wspoc:push`) al que ambas réplicas se suscribían. Al
+retirarse ese endpoint —el .NET 4.8 no puede llamar a Go, así que nunca iba a usarlo— se retiró
+también el bus. Está en el historial de git si vuelve a hacer falta.
 
-Quitando `WS_REDIS_ADDR` del Deployment, aproximadamente **la mitad de los push devuelven 404**:
-es la demostración de por qué hace falta el bus.
+Lo que sigue sin resolverse es el tope de conexiones, que es por proceso. Ver abajo.
 
 ### 1. El reparto entre réplicas funciona
 
@@ -116,10 +111,8 @@ aquí necesita pausas de ~20 s entre tandas.
 
 ### 2. El tope de conexiones deja de ser global
 
-Esto **no** lo resuelve Redis, que hoy solo transporta los push:
-
-`WS_MAX_CONNECTIONS` es un contador **en memoria de cada proceso** (`ConnectionRegistry` en
-`backend-go/guards.go`). Con N réplicas el techo real del servicio es `N × tope`.
+`WS_MAX_CONNECTIONS` es un contador **en memoria de cada proceso** (`session.Registry`, en
+`internal/session/registry.go`). Con N réplicas el techo real del servicio es `N × tope`.
 
 Con el tope bajado a **5** y 12 conexiones: **entraron 10**, repartidas 5 + 5. El tope declarado de
 5 dejó pasar el doble.
@@ -129,8 +122,8 @@ vuelve a cuadrar, pero deja **la mitad de la capacidad ociosa** — y desde un n
 conexiones comparten IP de origen, así que ese modo concentra todo en un pod.
 
 `4013 SERVER_AT_CAPACITY` deja de ser una propiedad del servicio y pasa a depender de a qué pod te
-mandó el balanceador. Un tope real exige estado compartido — y ahora que Redis ya está desplegado
-para el push, llevar ahí también el contador es un paso corto.
+mandó el balanceador. Un tope real exige estado compartido: hoy no hay ninguno desplegado, así que
+sería levantarlo solo para esto.
 
 Efecto secundario: **`/health` solo informa del pod que atendió esa petición**, no del servicio. El
 `activeConnections` que devuelve es parcial y no reproducible.

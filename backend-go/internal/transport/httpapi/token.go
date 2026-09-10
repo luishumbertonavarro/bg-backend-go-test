@@ -56,7 +56,33 @@ func (s *Server) handleSessionToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.sesionLibre(w, r, req.Session) {
+		return
+	}
+
 	s.issueSessionToken(w, r, req.Session)
+}
+
+// sesionLibre rechaza emitir un token para una sesión que ya tiene conexión viva.
+//
+// Hace falta porque la SESION la genera el frontend y es un NÚMERO: no hay nada
+// que adivinar, así que sin esto probar 1, 2, 3… bastaría para que un tercero se
+// quedara con el canal de otro usuario. Con esto, el robo solo funcionaría contra
+// una sesión que aún no se ha usado.
+//
+// No cierra el caso de reclamar una SESION ANTES que su dueño. Para eso el número
+// tendría que llevar entropía, generarlo Go, o validarlo el .NET — las tres cosas
+// cambian el contrato del login y están anotadas en SECURITY-CHECKLIST.md.
+//
+// No rompe la reconexión: una conexión caída se desregistra del registry, así que
+// la sesión vuelve a quedar libre en cuanto el socket muere.
+func (s *Server) sesionLibre(w http.ResponseWriter, r *http.Request, session string) bool {
+	if !s.registry.Conectada(session) {
+		return true
+	}
+	logging.Reject(protocol.SessionInUse, r.RemoteAddr, r.Header.Get("Origin"), "session-token sesion="+session)
+	writeRejection(w, protocol.SessionInUse)
+	return false
 }
 
 // issueSessionToken firma el token de una sesión ya validada y lo responde.

@@ -101,42 +101,6 @@
     </div>
   </div>
 
-  <!-- ------------------------------------------------------ puente con el .NET 4.8 -->
-  <div class="card">
-    <h3>Puente con el .NET 4.8</h3>
-    <p class="hint">
-      El canal tiene dos extremos. El .NET empuja a una sesión con
-      <code>POST /api/push</code> {{ '{' }} "sesion", "payload" {{ '}' }}, y lo que escribe el
-      cliente sale hacia el .NET con ese mismo sobre. Mientras no haya URL del .NET configurada,
-      los sobres se quedan aquí para poder verlos.
-    </p>
-
-    <div class="row wrap">
-      <input type="text" [ngModel]="pushText()" (ngModelChange)="pushText.set($event)"
-             placeholder="Texto que empujaría el .NET 4.8" spellcheck="false" />
-      <button type="button" (click)="sendPush()" [disabled]="!ws.sesion()">
-        Simular push del .NET 4.8
-      </button>
-      <button type="button" (click)="refreshOutbox()" [disabled]="!token()">
-        Ver lo que se enviaría al .NET
-      </button>
-    </div>
-
-    @if (outboxError(); as err) {
-      <p class="reject-detail">No se pudo consultar el outbox: {{ err }}</p>
-    }
-    @if (outboxUrl()) {
-      <p class="hint">Enviando de verdad a <code>{{ outboxUrl() }}</code>.</p>
-    } @else {
-      <p class="hint">
-        <code>WS_DOTNET_WEBHOOK_URL</code> está vacío: modo inspección, no se envía a ningún sitio.
-      </p>
-    }
-    @if (outbox().length) {
-      <pre class="frame">{{ outbox() | json }}</pre>
-    }
-  </div>
-
   <!-- ------------------------------------------------------ sondas de seguridad -->
   <div class="card">
     <h3>Sondas de seguridad</h3>

@@ -159,62 +159,61 @@ endpoint de diagnóstico del POC; en producción no se expondría.
 
 ---
 
-## 10. Puente REST con el backend .NET 4.8
+## 10. La sesión
 
-El canal tiene dos extremos: el navegador y el backend **.NET Framework 4.8**. El sobre que se
-intercambia con él es siempre el mismo, en los dos sentidos:
+Sale del claim **`sid`** del JWT ya validado en el handshake; si el token no lo trae, del `SESION`
+y, en último término, del `sub`. **El cliente nunca la envía por el canal**, así que no puede
+declarar la sesión de otro. Debe cumplir `[A-Za-z0-9_-]{1,64}`, igual que el `id` de los
+mensajes: viaja en logs y en respuestas JSON.
 
-```jsonc
-{ "sesion": "<id de sesión>", "payload": "<texto>" }
-```
+Una misma sesión puede tener varias conexiones (varias pestañas). Lo que se entrega por sesión
+—la respuesta del .NET— va a **todas**. El eco y el pong, en cambio, van solo al socket que
+preguntó.
 
-### La sesión
+### Lo que se retiró
 
-Sale del claim **`sid`** del JWT ya validado en el handshake; si el token no lo trae, del `sub`.
-**El cliente nunca la envía**, así que no puede declarar la sesión de otro. Debe cumplir
-`[A-Za-z0-9_-]{1,64}`, igual que el `id` de los mensajes: viaja en logs y en respuestas JSON.
+Existían `POST /api/push` y `GET /api/outbox`: un puente REST para que el .NET empujara mensajes
+a una sesión y recogiera lo que el cliente enviaba. Se retiraron porque exigían que el .NET 4.8
+llamara a Go, y ese backend no se toca.
 
-Una misma sesión puede tener varias conexiones (varias pestañas). La entrega va a todas.
+Con ellos desapareció la única razón por la que `WS_JWT_SECRET` tenía que compartirse con el
+.NET: **hoy el secreto no sale del servidor Go**. Y con ellos desapareció también la necesidad
+de un bus entre réplicas (Redis), porque ya no hay ninguna entrega que cruzar de un proceso a
+otro: la petición sube por un socket, la llamada al .NET la hace ese mismo proceso y la respuesta
+baja por ese mismo socket.
 
-### `POST /api/push` — el .NET empuja a un usuario
+## 11. Puente sincrono con el .NET 4.8 (`type: "peticion"`)
 
-- **Autenticación:** JWT HS256 en `Authorization: Bearer <token>`, con la **misma validación**
-  que el handshake (§2). El .NET no es un navegador, así que sí puede enviar cabeceras y no
-  necesita el token en la query string.
-- **Cuerpo:** esquema estricto, sin campos extra, y la **misma sanitización** que §4 — control
-  de caracteres, patrones de script y tope de 8192 en el `payload`. El push acaba en el DOM
-  igual que un eco, así que no puede ser un camino más laxo.
-- **Rate limit:** `WS_PUSH_RATE_LIMIT_PER_SEC` (100/s por defecto), global del endpoint.
+Go reenvia la peticion del cliente a `WS_DOTNET_API_URL` y **espera** la respuesta, que devuelve
+por el mismo socket. Los controles:
 
-| Situación | HTTP | `reason` |
-|---|---|---|
-| Entregado | 202 | — (devuelve `delivered`, `sesion`, `instance`) |
-| Token ausente/inválido/expirado | 401 | `TOKEN_*`, igual que §9 |
-| Esquema o payload inválido | 400 | `INVALID_PAYLOAD` |
-| Sesión mal formada | 400 | `INVALID_SESSION` |
-| Sesión no conectada | 404 | `SESSION_NOT_FOUND` |
-| Cuerpo > 64 KB | 413 | `MESSAGE_TOO_LARGE` |
-| Rate limit | 429 | `RATE_LIMIT_EXCEEDED` |
+| Control | Como |
+|---|---|
+| Saneado de la ida | El `payload` del cliente pasa por un esquema cerrado, sin patrones de script y dentro del tope de tamano. |
+| Saneado de la vuelta | Lo que responde el .NET **tambien** se valida y sanea. Acaba en el DOM del navegador, asi que no puede entrar por una puerta mas laxa que el resto. |
+| Tope de tamano | La respuesta se corta en streaming a `WS_MAX_MESSAGE_BYTES`; un .NET averiado no puede tumbar el proceso mandando un cuerpo gigante. |
+| Timeout | `WS_DOTNET_TIMEOUT_SECONDS` siempre, en el cliente HTTP y en el contexto. Un .NET colgado no retiene una goroutine para siempre. |
+| Tope de concurrencia | `WS_DOTNET_MAX_INFLIGHT` llamadas simultaneas. Al llenarse se rechaza con `BACKEND_BUSY` en vez de encolar sin limite. |
+| Enrutado de la respuesta | Si el .NET devuelve una `Sesion` **distinta** de la que pregunto, la respuesta se **descarta** y se registra `BACKEND_SESSION_MISMATCH`. Obedecerla entregaria la respuesta de un usuario a otro. |
+| El fallo no cierra el canal | Los cuatro motivos (`BACKEND_UNAVAILABLE`, `BACKEND_TIMEOUT`, `BACKEND_ERROR`, `BACKEND_BUSY`) llegan como frame `error` con el `id` de la peticion, sin cerrar el socket. |
 
-Al cliente le llega un frame normal del canal con `"type": "push"`.
+## 12. Riesgo conocido y aceptado: la SESION es un numero
 
-### `GET /api/outbox` — lo que se le enviaría al .NET
+`POST /api/session-token` emite el token del canal a **cualquiera** que presente una cadena con
+forma de sesion desde un Origin de la lista blanca. Como la SESION la genera el frontend y es un
+**numero**, no hay nada que adivinar: probar `1`, `2`, `3`... basta para intentar quedarse con el
+canal de otro usuario.
 
-Cada mensaje válido del cliente produce un sobre. Con `WS_DOTNET_WEBHOOK_URL` configurada se
-envía por `POST` a esa URL; **mientras esté vacía**, el sobre se guarda en memoria (buffer
-circular) y se registra como `[OUTBOX]` en el log, para poder inspeccionar el contrato exacto
-sin tener el .NET levantado. Este endpoint lo devuelve, con la misma autenticación que el push.
+**Lo que hay puesto:**
 
-### CORS
+- **`SESSION_IN_USE` (409).** No se emite un segundo token para una SESION que ya tiene conexion
+  viva. Cierra el caso realista —robar una sesion mientras su dueno la usa— y no rompe la
+  reconexion, porque una conexion caida se desregistra y la sesion vuelve a quedar libre.
+- **Rate limit propio** del endpoint (`WS_SESSION_TOKEN_RATE_LIMIT_PER_SEC`), separado del push.
+- **Traza de cada emision** con la SESION y el remoto (`[TOKEN]` en el log), para que un intento
+  de enumeracion se vea.
 
-Estas dos rutas llevan cabecera `Authorization`, así que el navegador manda antes un **preflight
-`OPTIONS`**. Se responde con `Access-Control-Allow-Methods` y `Access-Control-Allow-Headers`,
-y el `Allow-Origin` es siempre el **origen concreto de la lista blanca, nunca `*`**. Sin el
-preflight, la UI ve un fallo de red indistinguible de un servidor caído.
-
-### Límite conocido: el tope y la entrega son por proceso
-
-La conexión vive en la memoria de un solo proceso. Con varias réplicas, un `POST` que caiga en el
-pod que no tiene la sesión no entregaría nada. Se resuelve publicando el push en **Redis**
-(`WS_REDIS_ADDR`), al que están suscritas todas las réplicas. Con la variable vacía la entrega es
-local, que es correcto con una sola réplica.
+**Lo que NO cierra:** reclamar una SESION **antes** que su dueno. Para eso el numero tendria que
+llevar entropia (uno aleatorio grande en vez de un correlativo), generarlo Go, o validarlo el
+.NET. Las tres cosas cambian el contrato del login, asi que es una decision a tomar **antes de
+produccion**, no un olvido.

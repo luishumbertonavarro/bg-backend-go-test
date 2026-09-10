@@ -1,15 +1,15 @@
 import { Component, DestroyRef, inject, input, OnInit, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { DecimalPipe, JsonPipe } from '@angular/common';
+import { DecimalPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { WebSocketService } from '../core/websocket.service';
 import { DEFAULT_LOAD_OPTIONS, LoadTestOptions, LoadTestService } from '../core/load-test.service';
-import { BackendDescriptor, CLOSE_REASONS, Envelope, LogEntry, MAX_FRAME_CHARS } from '../core/ws.models';
+import { BackendDescriptor, CLOSE_REASONS, LogEntry, MAX_FRAME_CHARS } from '../core/ws.models';
 
 @Component({
   selector: 'app-backend-panel',
   standalone: true,
-  imports: [FormsModule, DecimalPipe, JsonPipe],
+  imports: [FormsModule, DecimalPipe],
   templateUrl: './backend-panel.html',
   styleUrl: './backend-panel.css',
   // Una instancia de cada servicio POR PESTAÑA: conexiones y métricas independientes.
@@ -30,10 +30,6 @@ export class BackendPanel implements OnInit {
   readonly autoPing = signal(false);
 
   /** Sobres {sesion, payload} que se le enviarían al backend .NET 4.8. */
-  readonly outbox = signal<Envelope[]>([]);
-  readonly outboxUrl = signal<string | null>(null);
-  readonly outboxError = signal<string | null>(null);
-  readonly pushText = signal('aviso desde el .NET 4.8');
 
   private autoPingTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -212,51 +208,6 @@ export class BackendPanel implements OnInit {
   /** Base HTTP del backend, derivada de la URL del WebSocket. */
   private apiBase(): string {
     return this.url().replace(/^ws/, 'http').replace(/\/ws$/, '');
-  }
-
-  /**
-   * Consulta lo que el backend le enviaría al .NET 4.8. Mientras no haya URL del
-   * .NET configurada, los sobres se quedan aquí para poder inspeccionarlos.
-   */
-  async refreshOutbox(): Promise<void> {
-    this.outboxError.set(null);
-    try {
-      const res = await fetch(`${this.apiBase()}/api/outbox`, {
-        headers: { Authorization: `Bearer ${this.token()}` },
-      });
-      if (!res.ok) {
-        this.outboxError.set(`HTTP ${res.status}`);
-        return;
-      }
-      const body = await res.json();
-      this.outbox.set(body.items ?? []);
-      this.outboxUrl.set(body.webhookUrl || null);
-    } catch {
-      // Mismo motivo que en el diagnóstico: sin CORS el navegador ni deja verlo.
-      this.outboxError.set('SERVIDOR_INALCANZABLE');
-    }
-  }
-
-  /** Simula al .NET 4.8 empujando a esta misma sesión. */
-  async sendPush(): Promise<void> {
-    const sesion = this.ws.sesion();
-    if (!sesion) return;
-    this.append('system', `simulando push del .NET 4.8 a la sesión ${sesion}`, 'info');
-    try {
-      const res = await fetch(`${this.apiBase()}/api/push`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${this.token()}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sesion, payload: this.pushText() }),
-      });
-      const body = await res.json().catch(() => ({}));
-      this.append(
-        'system',
-        `POST /api/push -> HTTP ${res.status} ${body.reason ?? `entregado a ${body.delivered} conexión(es)`}`,
-        res.ok ? 'success' : 'error',
-      );
-    } catch {
-      this.append('system', 'POST /api/push -> SERVIDOR_INALCANZABLE', 'error');
-    }
   }
 
   private append(

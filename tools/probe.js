@@ -16,7 +16,7 @@ const http = require('node:http');
 const WebSocket = require('ws');
 
 function loadEnv() {
-  const file = path.join(__dirname, '..', '.env');
+  const file = path.join(__dirname, '..', 'backend-go', '.env');
   const env = {};
   if (fs.existsSync(file)) {
     for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
@@ -82,34 +82,6 @@ function session(tok, action, { origin = ORIGIN, waitMs = 3000 } = {}) {
   });
 }
 
-/** Llama al REST del puente con el .NET 4.8. */
-function rest(method, urlPath, body, tok) {
-  return new Promise((resolve) => {
-    const u = new global.URL(URL_WS.replace(/^ws/, 'http'));
-    const payload = body ? Buffer.from(JSON.stringify(body)) : null;
-    const headers = {};
-    if (tok) headers.Authorization = `Bearer ${tok}`;
-    if (payload) {
-      headers['Content-Type'] = 'application/json';
-      headers['Content-Length'] = payload.length;
-    }
-    const req = http.request(
-      { hostname: u.hostname, port: u.port, path: urlPath, method, headers },
-      (res) => {
-        let data = '';
-        res.on('data', (c) => (data += c));
-        res.on('end', () => {
-          let j = {};
-          try { j = JSON.parse(data); } catch { /* respuesta no JSON */ }
-          resolve({ status: res.statusCode, ...j });
-        });
-      },
-    );
-    req.on('error', (e) => resolve({ status: 0, error: String(e.message) }));
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
 
 /** Abre una conexión con una sesión conocida y la deja viva para recibir push. */
 function openSession(sid) {
@@ -163,7 +135,7 @@ const check = (name, pass, detail) => {
   s = await session(TOKENS.valid, (ws) =>
     ws.send(JSON.stringify({ type: 'echo', id: 'p1', ts: Date.now(), payload: 'hola' })),
   );
-  check('Eco correcto', s.received.some((m) => m.type === 'echo' && m.payload === 'hola'), JSON.stringify(s.received[0] ?? {}));
+  check('Eco correcto', s.received.some((m) => m.type === 'echo' && m.Payload === 'hola'), JSON.stringify(s.received[0] ?? {}));
 
   s = await session(TOKENS.valid, (ws) =>
     ws.send(JSON.stringify({ type: 'ping', id: 'p2', ts: Date.now(), payload: '' })),
@@ -214,48 +186,60 @@ const check = (name, pass, detail) => {
   );
   check('Servidor sigue sano tras las sondas', s.received.some((m) => m.type === 'pong'), `code=${s.code}`);
 
-  // --- Puente REST con el .NET 4.8 ---------------------------------------
+  // --- Peticion al .NET 4.8 -----------------------------------------------
+  //
+  // Estas sondas valen este el .NET levantado o no: lo que comprueban es el
+  // contrato del canal, no la logica de negocio. Cuando no hay backend detras,
+  // la peticion vuelve como `error` con un motivo BACKEND_*, que es exactamente
+  // el comportamiento que se quiere verificar.
   const sid = `probe-${Date.now().toString(36)}`;
   const live = await openSession(sid);
 
-  let p = await rest('POST', '/api/push', { sesion: sid, payload: 'aviso desde el 4.8' }, TOKENS.valid);
-  check('Push válido devuelve 202', p.status === 202 && p.delivered === 1, `HTTP ${p.status} delivered=${p.delivered}`);
+  const preguntar = async (id, payload, ms = 7000) => {
+    live.ws.send(JSON.stringify({ type: 'peticion', id, ts: Date.now(), payload }));
+    const limite = Date.now() + ms;
+    while (Date.now() < limite) {
+      const m = live.received.find((x) => x.id === id);
+      if (m) return m;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return null;
+  };
 
-  await new Promise((r) => setTimeout(r, 300));
-  const push = live.received.find((m) => m.type === 'push');
-  check('El push llega al cliente por WebSocket', !!push && push.payload === 'aviso desde el 4.8',
-    push ? `payload=${push.payload}` : 'no llegó');
-  check('El frame lleva la sesión', !!push && push.sesion === sid, push ? `sesion=${push.sesion}` : '-');
+  const r1 = await preguntar('pet1', { numero: 7 });
+  check('Una peticion recibe respuesta con SU id',
+    !!r1 && (r1.type === 'respuesta' || r1.type === 'error'),
+    r1 ? `type=${r1.type}${r1.reason ? ' ' + r1.reason : ''}` : 'no llego nada');
+  check('La respuesta lleva la sesion del token',
+    !!r1 && r1.Sesion === sid, r1 ? `Sesion=${r1.Sesion}` : '-');
 
-  p = await rest('POST', '/api/push', { sesion: sid, payload: 'x' }, null);
-  check('Push sin token rechazado (401)', p.status === 401 && p.reason === 'TOKEN_MISSING', `HTTP ${p.status} ${p.reason}`);
+  // Dos a la vez: cada respuesta tiene que ir a su pregunta. Es lo unico que
+  // hace utilizable el canal con mas de una peticion en vuelo.
+  live.ws.send(JSON.stringify({ type: 'peticion', id: 'dosA', ts: Date.now(), payload: { numero: 1 } }));
+  live.ws.send(JSON.stringify({ type: 'peticion', id: 'dosB', ts: Date.now(), payload: { numero: 2 } }));
+  await new Promise((r) => setTimeout(r, 3000));
+  const a = live.received.find((m) => m.id === 'dosA');
+  const b = live.received.find((m) => m.id === 'dosB');
+  check('Dos peticiones simultaneas vuelven cada una con su id', !!a && !!b,
+    `dosA=${a ? a.type : 'no'} dosB=${b ? b.type : 'no'}`);
 
-  p = await rest('POST', '/api/push', { sesion: sid, payload: 'x' }, TOKENS.expired);
-  check('Push con token expirado rechazado', p.status === 401 && p.reason === 'TOKEN_EXPIRED', `HTTP ${p.status} ${p.reason}`);
+  // Un fallo del .NET no puede costar la conexion: falla la peticion, no la sesion.
+  live.ws.send(JSON.stringify({ type: 'ping', id: 'sigo-vivo', ts: Date.now(), payload: '' }));
+  await new Promise((r) => setTimeout(r, 400));
+  check('El canal sigue vivo despues de las peticiones',
+    live.received.some((m) => m.id === 'sigo-vivo' && m.type === 'pong'), '-');
 
-  p = await rest('POST', '/api/push', { sesion: 'no-existe-jamas', payload: 'x' }, TOKENS.valid);
-  check('Push a sesión inexistente da 404', p.status === 404 && p.reason === 'SESSION_NOT_FOUND', `HTTP ${p.status} ${p.reason}`);
+  // El payload de una peticion se sanea igual que el resto: acaba en el DOM.
+  let s2 = await session(TOKENS.valid, (ws) =>
+    ws.send(JSON.stringify({ type: 'peticion', id: 'xss', ts: Date.now(), payload: { x: '<script>alert(1)</script>' } })),
+  );
+  check('Peticion con <script> cierra 4010', s2.code === 4010, `code=${s2.code}`);
 
-  p = await rest('POST', '/api/push', { sesion: sid, payload: 'x', extra: 1 }, TOKENS.valid);
-  check('Push con campo desconocido da 400', p.status === 400, `HTTP ${p.status} ${p.reason}`);
-
-  p = await rest('POST', '/api/push', { sesion: sid, payload: '<script>alert(1)</script>' }, TOKENS.valid);
-  check('Push con <script> da 400', p.status === 400 && p.reason === 'INVALID_PAYLOAD', `HTTP ${p.status} ${p.reason}`);
-
-  p = await rest('POST', '/api/push', { sesion: 'no valido!', payload: 'x' }, TOKENS.valid);
-  check('Push con sesión mal formada da 400', p.status === 400 && p.reason === 'INVALID_SESSION', `HTTP ${p.status} ${p.reason}`);
-
-  // --- Outbox: lo que se le enviaría al .NET 4.8 --------------------------
-  live.ws.send(JSON.stringify({ type: 'echo', id: 'ob1', ts: Date.now(), payload: 'mensaje del cliente' }));
-  await new Promise((r) => setTimeout(r, 300));
-
-  let o = await rest('GET', '/api/outbox', null, TOKENS.valid);
-  const sobre = (o.items || []).find((i) => i.sesion === sid);
-  check('El mensaje del cliente llega al outbox', !!sobre && sobre.payload === 'mensaje del cliente',
-    sobre ? JSON.stringify(sobre) : 'no está');
-
-  o = await rest('GET', '/api/outbox', null, null);
-  check('Outbox sin token rechazado (401)', o.status === 401, `HTTP ${o.status} ${o.reason}`);
+  // Sin payload no hay nada que preguntarle al .NET.
+  s2 = await session(TOKENS.valid, (ws) =>
+    ws.send(JSON.stringify({ type: 'peticion', id: 'vacia', ts: Date.now() })),
+  );
+  check('Peticion sin payload cierra 4010', s2.code === 4010, `code=${s2.code}`);
 
   live.ws.close();
   await new Promise((r) => setTimeout(r, 200));

@@ -2,9 +2,7 @@
 //
 // Ninguna función de aquí escribe en la respuesta HTTP ni cierra sockets: solo
 // emite un veredicto. Quién lo traduce a un 401, a un frame de cierre 4001 o a
-// una línea de log es cosa de la capa de transporte. Esa separación es la que
-// permite que el mismo control valga para el handshake del WebSocket y para la
-// cabecera Authorization del REST.
+// una línea de log es cosa de la capa de transporte.
 package security
 
 import (
@@ -41,17 +39,13 @@ func denied(rejection protocol.Rejection) Verdict {
 
 // claims son los registrados más el identificador de sesión del POC.
 //
-// La sesión puede venir en tres sitios porque hay dos emisores: `sid` es el
-// claim canónico, `SESION` es el nombre con el que la sesión viaja en el resto
-// del contrato con el .NET (y el que emite el intercambio del frontend), y `sub`
-// es el último recurso para los tokens firmados a mano que ya existían.
+// La sesión puede venir en tres sitios: `sid` es el claim canónico, `SESION` es
+// el nombre con el que viaja en el contrato con el .NET, y `sub` es el último
+// recurso para los tokens firmados a mano de las herramientas de tools/.
 type claims struct {
 	jwt.RegisteredClaims
 	Sid    string `json:"sid,omitempty"`
 	Sesion string `json:"SESION,omitempty"`
-	// Canal marca los tokens que emite el intercambio del frontend. Solo sirven
-	// para abrir el canal; el puente REST los rechaza. Ver CheckBridgeToken.
-	Canal bool `json:"canal,omitempty"`
 }
 
 // Guard aplica los controles con una configuración concreta.
@@ -77,45 +71,17 @@ func (g Guard) CheckOrigin(origin string) Verdict {
 	return denied(protocol.OriginNotAllowed)
 }
 
-// CheckToken valida por completo el JWT HS256. Es el control del canal.
+// CheckToken valida por completo el JWT HS256. Es el control del canal, y desde
+// que no hay puente REST entrante, el único control de token del servicio.
 func (g Guard) CheckToken(raw string) Verdict {
-	verdict, _ := g.parseToken(raw)
-	return verdict
+	return g.parseToken(raw)
 }
 
-// CheckBridgeToken valida el token del puente REST (/api/push, /api/outbox).
-//
-// Es CheckToken más una exclusión: rechaza los tokens que emite el intercambio
-// del frontend, que van marcados con `canal`.
-//
-// Hace falta porque las dos puertas compartían control y el intercambio rompió esa
-// simetría: reparte tokens válidos a quien traiga una SESION, y con uno de ellos
-// se podía inyectar un push en la sesión de cualquier otro usuario.
-//
-// Es una exclusión y no un permiso explícito porque el backend que empuja no está
-// bajo nuestro control y no puede añadir un claim nuevo a sus tokens. Lo que
-// sostiene el control es que para obtener un token SIN la marca hay que conocer
-// WS_JWT_SECRET — exactamente el requisito que este endpoint tenía antes de que
-// el intercambio existiera. La contrapartida es que un emisor nuevo que olvidara
-// la marca volvería a abrir el puente; por eso la marca la pone Issuer y no cada
-// punto de emisión.
-func (g Guard) CheckBridgeToken(raw string) Verdict {
-	verdict, parsed := g.parseToken(raw)
-	if !verdict.Allowed {
-		return verdict
-	}
-	if parsed.Canal {
-		return denied(protocol.TokenClaimsInvalid)
-	}
-	return verdict
-}
-
-// parseToken hace la verificación común y devuelve también los claims, para que
-// quien necesite mirar dentro no tenga que volver a parsear (ni a decidir por su
-// cuenta qué hace válido a un token).
-func (g Guard) parseToken(raw string) (Verdict, claims) {
+// parseToken hace la verificación del token: firma, algoritmo, emisor, audiencia,
+// vigencia y sesión utilizable.
+func (g Guard) parseToken(raw string) Verdict {
 	if strings.TrimSpace(raw) == "" {
-		return denied(protocol.TokenMissing), claims{}
+		return denied(protocol.TokenMissing)
 	}
 
 	parsed := claims{}
@@ -133,15 +99,15 @@ func (g Guard) parseToken(raw string) (Verdict, claims) {
 
 	switch {
 	case err == nil:
-		return g.verdictFromClaims(parsed), parsed
+		return g.verdictFromClaims(parsed)
 	case errors.Is(err, jwt.ErrTokenExpired):
-		return denied(protocol.TokenExpired), claims{}
+		return denied(protocol.TokenExpired)
 	case errors.Is(err, jwt.ErrTokenInvalidIssuer),
 		errors.Is(err, jwt.ErrTokenInvalidAudience),
 		errors.Is(err, jwt.ErrTokenRequiredClaimMissing):
-		return denied(protocol.TokenClaimsInvalid), claims{}
+		return denied(protocol.TokenClaimsInvalid)
 	default:
-		return denied(protocol.TokenInvalid), claims{}
+		return denied(protocol.TokenInvalid)
 	}
 }
 
@@ -168,18 +134,4 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-// BearerToken extrae el token de una cabecera Authorization.
-//
-// El prefijo "Bearer " es opcional: se acepta también el token pelado, porque el
-// .NET 4.8 que llama al puente puede montar la cabecera de cualquiera de las dos formas.
-func BearerToken(header string) string {
-	if header == "" {
-		return ""
-	}
-	if strings.HasPrefix(strings.ToLower(header), "bearer ") {
-		return strings.TrimSpace(header[len("bearer "):])
-	}
-	return strings.TrimSpace(header)
 }

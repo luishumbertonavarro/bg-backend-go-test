@@ -53,9 +53,9 @@ node tools/loadtest.js    # 120 conexiones concurrentes
 ```
 backend-go/            El servidor (+ vendor/, Dockerfile)
 frontend-angular/      Angular 20 — cliente con métricas, sondas y prueba de carga  → :4200
-tools/                 gen-token.js · probe.js · loadtest.js · push.js
+tools/                 gen-token.js · probe.js · loadtest.js · fake-dotnet.js · peticion.js
 k8s/                   kind + 2 réplicas — el escenario multi-instancia
-.env                   Configuración compartida por el servidor y las herramientas
+backend-go/.env        Configuración compartida por el servidor y las herramientas
 SECURITY-CHECKLIST.md  El contrato que el servidor cumple
 start.ps1              Compila, levanta y comprueba
 logs/                  Salida de ejecución (no versionada)
@@ -65,13 +65,12 @@ El servidor es un solo paquete, por capas:
 
 | Fichero | Capa |
 |---|---|
-| `backend-go/config.go` | Carga de configuración. Busca el `.env` **subiendo por los directorios padre**; una variable de entorno real siempre gana al fichero. |
-| `backend-go/guards.go` | El núcleo de seguridad: validación de token, origen y mensajes (funciones puras), más el limitador de ritmo y el registro de conexiones. |
-| `backend-go/main.go` | Transporte: rutas, handshake y el bucle de lectura, una goroutine por conexión con `recover()` propio. |
-| `backend-go/sessions.go` | El mapa sesión → conexiones, y la **única goroutine que escribe** en cada socket. |
-| `backend-go/rest.go` | El puente con el .NET 4.8: `POST /api/push` y `GET /api/outbox`. |
-| `backend-go/delivery.go` | Elige cómo se entrega: local con una réplica, Redis con varias. |
-| `backend-go/redis.go` | Enrutado del push entre réplicas por pub/sub. |
+| `internal/config/` | Carga de configuración. Busca el `.env` **subiendo por los directorios padre**; una variable de entorno real siempre gana al fichero. El arranque deja en el log de qué fichero salió. |
+| `internal/security/` | El núcleo de seguridad: emisión y verificación de tokens, y validación de origen. Solo emite veredictos; no escribe respuestas HTTP. |
+| `internal/protocol/` | El contrato: mensajes del canal, sobres del .NET, catálogo de rechazos y todo el saneado. |
+| `internal/bridge/` | La llamada **síncrona** al .NET 4.8: pregunta y espera la respuesta, con timeout y tope de concurrencia. |
+| `internal/transport/httpapi/` | Transporte: rutas, handshake y el bucle de lectura, una goroutine por conexión con `recover()` propio. |
+| `internal/session/` | El mapa sesión → conexiones, y la **única goroutine que escribe** en cada socket. |
 
 ---
 
@@ -172,9 +171,20 @@ concreto de la lista blanca, nunca `*`**.
 ## El puente con el .NET 4.8
 
 ```
-.NET 4.8  --POST /api/push {sesion, payload}-->  Go  --WebSocket-->  navegador
-navegador  --WebSocket-->  Go  --sobre {sesion, payload}-->  .NET 4.8
+navegador --WS: peticion--> Go --POST--> .NET 4.8 calcula
+navegador <--WS: respuesta-- Go <--misma respuesta HTTP--
 ```
+
+**Es síncrono, y es el único camino.** El .NET 4.8 no es código nuestro y no se toca, así que no
+puede llamar de vuelta a Go: la única forma de que su respuesta llegue al navegador es que Go la
+recoja del mismo HTTP en el que preguntó.
+
+Hubo un camino inverso —`POST /api/push`, para que el .NET empujara sin que nadie se lo pidiera—
+y se retiró: exigía que el .NET supiera llamar a Go, que es justo lo que no puede hacer. Está en
+el historial de git por si algún día hay un backend que sí sepa.
+
+El ciclo completo, con su contrato y sus modos de fallo, está en
+[`backend-go/README.md`](backend-go/README.md#el-ciclo-completo-una-peticion-del-cliente-al-net-y-vuelta).
 
 ### La sesión: quién es cada usuario
 
@@ -187,56 +197,25 @@ node tools/gen-token.js --sid ana-1     # token para la sesión "ana-1"
 
 La UI la muestra en las métricas, junto a la instancia, para poder copiarla.
 
-### `POST /api/push` — el .NET empuja al navegador
+**El día que exista la ruta del .NET**, se rellena `WS_DOTNET_API_URL` en `backend-go/.env` y las
+`peticion` empiezan a viajar. No hay que tocar código: con la variable vacía, una `peticion`
+responde `BACKEND_UNAVAILABLE` y el resto del canal sigue funcionando.
 
-```bash
-node tools/push.js --sesion ana-1 --payload "tienes una notificación"
-```
+### Con varias réplicas no hace falta nada
 
-```jsonc
-// Authorization: Bearer <jwt>
-{ "sesion": "ana-1", "payload": "tienes una notificación" }
-// 202 -> { "delivered": 1, "sesion": "ana-1", "instance": "..." }
-```
+La conexión vive en la memoria de **un** proceso, y ahí se queda todo: la `peticion` sube por ese
+socket, la llamada al .NET la hace ese mismo proceso y la respuesta baja por ese mismo socket.
+No hay entrega que cruzar entre réplicas, así que escalar es poner más pods y repartir conexiones.
 
-Al cliente le llega un frame normal del canal con `"type": "push"`. Se valida con **los mismos
-controles que el WebSocket** —token, esquema estricto, sanitización de `<script>`, tope de tamaño,
-rate limit—: el push acaba en el DOM igual que un eco, así que no puede ser un camino más laxo.
-Los códigos están en el [§10 del checklist](SECURITY-CHECKLIST.md).
-
-### `GET /api/outbox` — ver lo que se le enviaría al .NET
-
-Cada mensaje del cliente produce un sobre hacia el .NET. **Como todavía no hay URL del .NET**, esos
-sobres no se envían a ningún sitio: se guardan y se pueden inspeccionar, que es justo lo que hace
-falta para pasarle el contrato al equipo del 4.8.
-
-```bash
-node tools/push.js --outbox
-```
-```jsonc
-{ "webhookUrl": "", "count": 1,
-  "items": [ { "sesion": "ana-1", "payload": "hola desde Angular 20" } ] }
-```
-
-También salen en el log como `[OUTBOX]`, y la UI los enseña con el botón *Ver lo que se enviaría
-al .NET*.
-
-**El día que exista la URL**, se rellena `WS_DOTNET_WEBHOOK_URL` en el `.env` y el mismo sobre
-empieza a viajar por `POST` a esa dirección. No hay que tocar código. El envío va en una goroutine
-aparte con timeout: un .NET lento o caído no frena al navegador ni tumba la conexión.
-
-### Con varias réplicas hace falta Redis
-
-La conexión vive en la memoria de **un** proceso. Con 2 pods, un `POST` que caiga en el que no
-tiene la sesión no entregaría nada. Definiendo `WS_REDIS_ADDR`, el push se publica en Redis, todas
-las réplicas están suscritas y entrega la que tiene la conexión. Con la variable vacía la entrega
-es local, que es correcto con una sola réplica y no obliga a levantar nada.
+Antes sí hacía falta un bus (Redis), porque un `POST /api/push` podía caer en el pod que no tenía
+la sesión. Al retirarse ese camino, la necesidad desapareció con él.
 
 ---
 
 ## Configuración
 
-Todo sale del `.env` de la raíz. Una variable de entorno real gana al valor del fichero.
+Todo sale de `backend-go/.env`. Una variable de entorno real gana al valor del fichero, y el log
+de arranque dice de qué fichero salió la configuración que está corriendo.
 
 | Variable | Por defecto | Qué hace |
 |---|---|---|
@@ -252,11 +231,11 @@ Todo sale del `.env` de la raíz. Una variable de entorno real gana al valor del
 | `WS_RATE_LIMIT_PER_SEC` | `20` | Mensajes por segundo y conexión (§6). |
 | `WS_MAX_CONNECTIONS` | `200` | Conexiones concurrentes por **proceso** (§7). |
 | `WS_IDLE_TIMEOUT_SECONDS` | `60` | Silencio tolerado antes del cierre `4014`. |
-| `WS_DOTNET_WEBHOOK_URL` | *(vacío)* | URL del .NET 4.8. **Vacío = modo inspección**, no se envía nada. |
-| `WS_DOTNET_TIMEOUT_SECONDS` | `5` | Timeout del POST saliente hacia el .NET. |
-| `WS_PUSH_RATE_LIMIT_PER_SEC` | `100` | Tope del endpoint de push. |
-| `WS_OUTBOX_SIZE` | `200` | Sobres que se guardan para inspección. |
-| `WS_REDIS_ADDR` | *(vacío)* | Vacío = entrega local, una réplica. |
+| `WS_DOTNET_API_URL` | *(vacío)* | Ruta del .NET 4.8 a la que se reenvían las `peticion`. **Vacío = no hay a quién preguntar**: la petición responde `BACKEND_UNAVAILABLE` y el resto del canal sigue funcionando. Se acepta el nombre antiguo `WS_DOTNET_WEBHOOK_URL`. |
+| `WS_DOTNET_TIMEOUT_SECONDS` | `5` | Timeout de la llamada al .NET. Superarlo da `BACKEND_TIMEOUT`. |
+| `WS_DOTNET_MAX_INFLIGHT` | `32` | Llamadas simultáneas al .NET. Al llenarse se rechaza con `BACKPRESSURE` en vez de encolar. |
+| `WS_SESSION_TOKEN_TTL_SECONDS` | `3600` | Vigencia del token que emite `POST /api/session-token`. |
+| `WS_SESSION_TOKEN_RATE_LIMIT_PER_SEC` | `20` | Tope propio del intercambio, separado del push. |
 
 El `.env` se busca **subiendo por los directorios padre** desde el binario: si mueves `wspoc-go.exe`
 fuera de `backend-go/`, deja de encontrarlo y hay que pasar la configuración por entorno.
@@ -268,11 +247,15 @@ fuera de `backend-go/`, deja de encontrarlo y hay que pasar la configuración po
 | Script | Para qué |
 |---|---|
 | `node tools/gen-token.js` | Token HS256 válido (60 min). `--kind expired\|badsig\|badiss\|badaud` genera los inválidos; `--all` los imprime todos en JSON; `--sub` y `--ttl` para ajustarlo. |
-| `node tools/probe.js` | 28 sondas que comprueban que cada control rechaza lo que debe y con el código correcto: 17 del canal WebSocket y 11 del puente REST. **Sale con código 1 si alguna falla** — usable en CI. |
+| `node tools/probe.js` | 23 sondas que comprueban que cada control rechaza lo que debe y con el código correcto: el handshake, el bucle del canal y el ciclo de `peticion`. **Sale con código 1 si alguna falla** — usable en CI. |
 | `node tools/loadtest.js` | Prueba de carga independiente del navegador. |
-| `node tools/push.js` | Simula al .NET 4.8: empuja a una sesión y consulta el outbox. |
+| `node tools/fake-dotnet.js` | Hace de ruta del .NET 4.8 para el ciclo síncrono: devuelve el número con un estado. `--delay`, `--status`, `--sesion` y `--sin-sesion` fuerzan cada camino raro del puente. |
+| `node tools/peticion.js` | Ejerce el ciclo completo desde el cliente: abre el canal, manda una `peticion` y espera la respuesta. `--ping` comprueba además que un fallo del .NET no cierra el socket. **Sale con código 1 si el ciclo no se cierra.** |
 
-Los tres leen el mismo `.env` que el servidor, así que siempre hablan el mismo idioma.
+Todas leen el mismo `backend-go/.env` que el servidor, así que siempre hablan el mismo idioma.
+Que no fuera así costó una tarde: había un segundo `.env` en la raíz con otro secreto, el servidor
+leía uno y las herramientas el otro, y todo token generado fuera fallaba con `TOKEN_INVALID` sin
+que nada dijera por qué. Por eso ahora el arranque registra la ruta del fichero que cargó.
 
 ```bash
 node tools/loadtest.js --conns 150 --msgs 20 --rate 10
